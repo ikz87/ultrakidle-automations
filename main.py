@@ -1,4 +1,3 @@
-# main.py
 import io
 import os
 import re
@@ -116,14 +115,17 @@ def get_active_forum_threads(guild_id: str, forum_channel_id: str) -> list:
     if not res.ok:
         return []
     return [
-        t for t in res.json().get("threads", [])
+        t
+        for t in res.json().get("threads", [])
         if t["parent_id"] == forum_channel_id
         and not t.get("thread_metadata", {}).get("archived", False)
     ]
 
 
 def get_starter_message(thread_id: str) -> dict | None:
-    res = discord_fetch(f"{DISCORD_API}/channels/{thread_id}/messages/{thread_id}")
+    res = discord_fetch(
+        f"{DISCORD_API}/channels/{thread_id}/messages/{thread_id}"
+    )
     if not res.ok:
         return None
     return res.json()
@@ -151,7 +153,9 @@ def discord_avatar_url(user_id: str, avatar_hash: str | None) -> str:
 def is_image_attachment(a: dict) -> bool:
     if (a.get("content_type") or "").startswith("image/"):
         return True
-    return bool(re.search(r"\.(png|jpe?g|webp|gif)$", a.get("filename") or "", re.IGNORECASE))
+    return bool(
+        re.search(r"\.(png|jpe?g|webp|gif)$", a.get("filename") or "", re.IGNORECASE)
+    )
 
 
 @app.post("/run")
@@ -165,7 +169,9 @@ def run_poll(request: Request):
 
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-    levels_res = supabase.table("levels").select("id, level_number, level_name").execute()
+    levels_res = (
+        supabase.table("levels").select("id, level_number, level_name").execute()
+    )
     levels = levels_res.data
     if not levels:
         print("[init] No levels found")
@@ -174,7 +180,9 @@ def run_poll(request: Request):
     print(f"[init] Loaded {len(levels)} levels")
     level_map = {l["level_number"]: l["id"] for l in levels}
 
-    forums_res = supabase.table("submission_forums").select("channel_id, guild_id").execute()
+    forums_res = (
+        supabase.table("submission_forums").select("channel_id, guild_id").execute()
+    )
     forums = forums_res.data
     if not forums:
         print("[init] No tracked forums")
@@ -190,19 +198,32 @@ def run_poll(request: Request):
     # --- PHASE 1: Ingest ---
     for forum in forums:
         print(f"[ingest] Discovering threads in forum {forum['channel_id']}")
-        active_threads = get_active_forum_threads(forum["guild_id"], forum["channel_id"])
+        active_threads = get_active_forum_threads(
+            forum["guild_id"], forum["channel_id"]
+        )
         print(f"[ingest] Found {len(active_threads)} active thread(s)")
 
         thread_ids = [t["id"] for t in active_threads]
 
-        existing_res = supabase.table("image_submissions").select("message_id").in_("message_id", thread_ids).execute()
-        rejected_res = supabase.table("rejected_threads").select("thread_id").in_("thread_id", thread_ids).execute()
+        existing_res = (
+            supabase.table("image_submissions")
+            .select("message_id")
+            .in_("message_id", thread_ids)
+            .execute()
+        )
+        rejected_res = (
+            supabase.table("rejected_threads")
+            .select("thread_id")
+            .in_("thread_id", thread_ids)
+            .execute()
+        )
 
         existing_ids = {e["message_id"] for e in (existing_res.data or [])}
         rejected_ids = {r["thread_id"] for r in (rejected_res.data or [])}
 
         new_threads = [
-            t for t in active_threads
+            t
+            for t in active_threads
             if t["id"] not in existing_ids and t["id"] not in rejected_ids
         ][:INGEST_BATCH_SIZE]
 
@@ -214,23 +235,33 @@ def run_poll(request: Request):
                 title = (thread.get("name") or "").strip()
                 match = LEVEL_PATTERN.match(title)
                 if not match:
-                    print(f"[ingest] Rejecting {thread['id']} — invalid title: \"{title}\"")
+                    print(
+                        f'[ingest] Rejecting {thread["id"]} — invalid title: "{title}"'
+                    )
                     reject_thread(
-                        thread["id"], thread["id"],
+                        thread["id"],
+                        thread["id"],
                         f"Post title must be exactly a level name (e.g. `2-1`, `P-2`, `0-E`, `7-S`). Got: `{title}`",
                     )
-                    supabase.table("rejected_threads").insert({"thread_id": thread["id"]}).execute()
+                    supabase.table("rejected_threads").insert(
+                        {"thread_id": thread["id"]}
+                    ).execute()
                     continue
 
                 level_number = match.group(1).upper()
                 level_id = level_map.get(level_number)
                 if not level_id:
-                    print(f"[ingest] Rejecting {thread['id']} — unknown level \"{level_number}\"")
+                    print(
+                        f'[ingest] Rejecting {thread["id"]} — unknown level "{level_number}"'
+                    )
                     reject_thread(
-                        thread["id"], thread["id"],
+                        thread["id"],
+                        thread["id"],
                         f"Level `{level_number}` was not found in the database.",
                     )
-                    supabase.table("rejected_threads").insert({"thread_id": thread["id"]}).execute()
+                    supabase.table("rejected_threads").insert(
+                        {"thread_id": thread["id"]}
+                    ).execute()
                     continue
 
                 msg = get_starter_message(thread["id"])
@@ -239,42 +270,72 @@ def run_poll(request: Request):
                     close_thread(thread["id"])
                     continue
 
-                image_attachments = [a for a in (msg.get("attachments") or []) if is_image_attachment(a)]
+                image_attachments = [
+                    a for a in (msg.get("attachments") or []) if is_image_attachment(a)
+                ]
                 if len(image_attachments) == 0:
                     print(f"[ingest] Rejecting {thread['id']} — no image")
-                    reject_thread(thread["id"], thread["id"], "The first message must contain exactly one image attachment.")
-                    supabase.table("rejected_threads").insert({"thread_id": thread["id"]}).execute()
+                    reject_thread(
+                        thread["id"],
+                        thread["id"],
+                        "The first message must contain exactly one image attachment.",
+                    )
+                    supabase.table("rejected_threads").insert(
+                        {"thread_id": thread["id"]}
+                    ).execute()
                     continue
                 if len(image_attachments) > 1:
-                    print(f"[ingest] Rejecting {thread['id']} — {len(image_attachments)} images")
-                    reject_thread(thread["id"], thread["id"], f"The first message must contain exactly one image. Found {len(image_attachments)}.")
-                    supabase.table("rejected_threads").insert({"thread_id": thread["id"]}).execute()
+                    print(
+                        f"[ingest] Rejecting {thread['id']} — {len(image_attachments)} images"
+                    )
+                    reject_thread(
+                        thread["id"],
+                        thread["id"],
+                        f"The first message must contain exactly one image. Found {len(image_attachments)}.",
+                    )
+                    supabase.table("rejected_threads").insert(
+                        {"thread_id": thread["id"]}
+                    ).execute()
                     continue
 
                 attachment = image_attachments[0]
                 image_data = download_image(attachment["url"])
                 img = PILImage.open(io.BytesIO(image_data))
                 if not is_aspect_ratio_16x9(img.width, img.height):
-                    print(f"[ingest] Rejecting {thread['id']} — not 16:9 ({img.width}x{img.height})")
-                    reject_thread(thread["id"], thread["id"], f"Image must be 16:9 aspect ratio. Got {img.width}×{img.height}.")
-                    supabase.table("rejected_threads").insert({"thread_id": thread["id"]}).execute()
+                    print(
+                        f"[ingest] Rejecting {thread['id']} — not 16:9 ({img.width}x{img.height})"
+                    )
+                    reject_thread(
+                        thread["id"],
+                        thread["id"],
+                        f"Image must be 16:9 aspect ratio. Got {img.width}×{img.height}.",
+                    )
+                    supabase.table("rejected_threads").insert(
+                        {"thread_id": thread["id"]}
+                    ).execute()
                     continue
 
                 author = msg["author"]
                 display_name = author.get("global_name") or author["username"]
 
-                res = supabase.table("image_submissions").insert({
-                    "guild_id": forum["guild_id"],
-                    "channel_id": thread["id"],
-                    "message_id": thread["id"],
-                    "discord_user_id": author["id"],
-                    "discord_name": display_name,
-                    "discord_avatar_url": discord_avatar_url(author["id"], author.get("avatar")),
-                    "level_id": level_id,
-                    "image_url": attachment["url"],
-                }).execute()
+                supabase.table("image_submissions").insert(
+                    {
+                        "guild_id": forum["guild_id"],
+                        "channel_id": thread["id"],
+                        "message_id": thread["id"],
+                        "discord_user_id": author["id"],
+                        "discord_name": display_name,
+                        "discord_avatar_url": discord_avatar_url(
+                            author["id"], author.get("avatar")
+                        ),
+                        "level_id": level_id,
+                        "image_url": attachment["url"],
+                    }
+                ).execute()
 
-                print(f"[ingest] ✓ Ingested {thread['id']} — level {level_number} by {display_name}")
+                print(
+                    f"[ingest] ✓ Ingested {thread['id']} — level {level_number} by {display_name}"
+                )
                 add_reaction(thread["id"], thread["id"], "👀")
                 total_ingested += 1
 
@@ -302,7 +363,9 @@ def run_poll(request: Request):
             time.sleep(1)
             thread_res = discord_fetch(f"{DISCORD_API}/channels/{sub['channel_id']}")
             if not thread_res.ok:
-                print(f"[resolve] Failed thread fetch {sub['channel_id']}: {thread_res.status_code}")
+                print(
+                    f"[resolve] Failed thread fetch {sub['channel_id']}: {thread_res.status_code}"
+                )
                 continue
 
             thread_data = thread_res.json()
@@ -312,41 +375,67 @@ def run_poll(request: Request):
 
             if not level_id:
                 print(f"[resolve] Rejecting #{sub['id']} - title edited to invalid")
-                reject_thread(sub["channel_id"], sub["message_id"], f'Title edited to invalid level: "{current_title}"')
-                supabase.table("image_submissions").update({
-                    "status": "rejected",
-                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", sub["id"]).execute()
+                reject_thread(
+                    sub["channel_id"],
+                    sub["message_id"],
+                    f'Title edited to invalid level: "{current_title}"',
+                )
+                supabase.table("image_submissions").update(
+                    {
+                        "status": "rejected",
+                        "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("id", sub["id"]).execute()
                 total_resolved += 1
                 continue
 
             if level_id != sub["level_id"]:
-                supabase.table("image_submissions").update({"level_id": level_id}).eq("id", sub["id"]).execute()
+                supabase.table("image_submissions").update({"level_id": level_id}).eq(
+                    "id", sub["id"]
+                ).execute()
                 sub["level_id"] = level_id
 
-            up_users = get_reaction_users(sub["channel_id"], sub["message_id"], "👍")
-            down_users = get_reaction_users(sub["channel_id"], sub["message_id"], "👎")
+            up_users = get_reaction_users(
+                sub["channel_id"], sub["message_id"], "👍"
+            )
+            down_users = get_reaction_users(
+                sub["channel_id"], sub["message_id"], "👎"
+            )
             up, down = len(up_users), len(down_users)
 
-            supabase.table("image_submissions").update({"thumbs_up": up, "thumbs_down": down}).eq("id", sub["id"]).execute()
+            supabase.table("image_submissions").update(
+                {"thumbs_up": up, "thumbs_down": down}
+            ).eq("id", sub["id"]).execute()
 
             if up < REACTION_THRESHOLD and down < REACTION_THRESHOLD:
-                print(f"[resolve] #{sub['id']} — {up}👍 {down}👎 (need {REACTION_THRESHOLD}), skipping")
+                print(
+                    f"[resolve] #{sub['id']} — {up}👍 {down}👎 (need {REACTION_THRESHOLD}), skipping"
+                )
                 continue
 
             if up > down:
                 fresh_msg = get_starter_message(sub["channel_id"])
                 fresh_attachment = next(
-                    (a for a in (fresh_msg.get("attachments") or []) if is_image_attachment(a)),
+                    (
+                        a
+                        for a in (fresh_msg.get("attachments") or [])
+                        if is_image_attachment(a)
+                    ),
                     None,
                 )
                 if not fresh_attachment:
                     print(f"[resolve] #{sub['id']} — image no longer available")
-                    reject_thread(sub["channel_id"], sub["message_id"], "Original image is no longer available.")
-                    supabase.table("image_submissions").update({
-                        "status": "rejected",
-                        "resolved_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", sub["id"]).execute()
+                    reject_thread(
+                        sub["channel_id"],
+                        sub["message_id"],
+                        "Original image is no longer available.",
+                    )
+                    supabase.table("image_submissions").update(
+                        {
+                            "status": "rejected",
+                            "resolved_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    ).eq("id", sub["id"]).execute()
                     total_resolved += 1
                     continue
 
@@ -357,38 +446,49 @@ def run_poll(request: Request):
                 resized.save(buf, format="JPEG", quality=90)
                 jpeg_data = buf.getvalue()
 
-                level_number = next((l["level_number"] for l in levels if l["id"] == sub["level_id"]), None)
+                level_number = next(
+                    (l["level_number"] for l in levels if l["id"] == sub["level_id"]),
+                    None,
+                )
                 storage_path = f"{level_number}/{sub['id']}.jpg"
 
-                upload_res = supabase.storage.from_("level-images").upload(
-                    storage_path, jpeg_data,
+                supabase.storage.from_("level-images").upload(
+                    storage_path,
+                    jpeg_data,
                     {"content-type": "image/jpeg", "upsert": "false"},
                 )
 
-                # supabase-py storage raises on error, but check just in case
                 remove_reaction(sub["channel_id"], sub["message_id"], "👀")
                 add_reaction(sub["channel_id"], sub["message_id"], "✅")
-                send_message(sub["channel_id"], "✅ **Submission approved!** Added to gallery.")
+                send_message(
+                    sub["channel_id"], "✅ **Submission approved!** Added to gallery."
+                )
                 close_thread(sub["channel_id"])
 
-                supabase.table("image_submissions").update({
-                    "status": "approved",
-                    "storage_path": storage_path,
-                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", sub["id"]).execute()
+                supabase.table("image_submissions").update(
+                    {
+                        "status": "approved",
+                        "storage_path": storage_path,
+                        "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("id", sub["id"]).execute()
 
                 total_resolved += 1
                 total_approved_this_cycle += 1
                 print(f"[resolve] ✓ Approved #{sub['id']} — {up}👍 {down}👎")
 
             else:
-                supabase.table("image_submissions").update({
-                    "status": "rejected",
-                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", sub["id"]).execute()
+                supabase.table("image_submissions").update(
+                    {
+                        "status": "rejected",
+                        "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("id", sub["id"]).execute()
                 remove_reaction(sub["channel_id"], sub["message_id"], "👀")
                 add_reaction(sub["channel_id"], sub["message_id"], "❌")
-                send_message(sub["channel_id"], "❌ **Submission rejected** by vote.")
+                send_message(
+                    sub["channel_id"], "❌ **Submission rejected** by vote."
+                )
                 close_thread(sub["channel_id"])
                 total_resolved += 1
                 print(f"[resolve] ✗ Rejected #{sub['id']} — {up}👍 {down}👎")
@@ -396,10 +496,12 @@ def run_poll(request: Request):
         except Exception as e:
             print(f"[resolve] Unexpected error for #{sub['id']}: {e}")
             try:
-                supabase.table("image_submissions").update({
-                    "status": "rejected",
-                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", sub["id"]).execute()
+                supabase.table("image_submissions").update(
+                    {
+                        "status": "rejected",
+                        "resolved_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("id", sub["id"]).execute()
                 close_thread(sub["channel_id"])
             except Exception:
                 pass
@@ -427,10 +529,12 @@ def run_poll(request: Request):
                 "⏰ **Submission expired** — This thread has been open for over 2 days without reaching the vote threshold. Feel free to resubmit!",
             )
             close_thread(sub["channel_id"])
-            supabase.table("image_submissions").update({
-                "status": "expired",
-                "resolved_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", sub["id"]).execute()
+            supabase.table("image_submissions").update(
+                {
+                    "status": "expired",
+                    "resolved_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ).eq("id", sub["id"]).execute()
             print(f"[stale] ✓ Archived #{sub['id']}")
             total_stale += 1
             total_resolved += 1
@@ -446,6 +550,14 @@ def run_poll(request: Request):
     )
     approved_subs = approved_res.data or []
 
+    pending_count_res = (
+        supabase.table("image_submissions")
+        .select("id", count="exact")
+        .eq("status", "pending")
+        .execute()
+    )
+    pending_count = pending_count_res.count or 0
+
     if approved_subs:
         total_approved = len(approved_subs)
         level_counts: dict[str, int] = {}
@@ -453,10 +565,16 @@ def run_poll(request: Request):
 
         for s in approved_subs:
             level_counts[s["level_id"]] = level_counts.get(s["level_id"], 0) + 1
-            user_counts[s["discord_user_id"]] = user_counts.get(s["discord_user_id"], 0) + 1
+            user_counts[s["discord_user_id"]] = (
+                user_counts.get(s["discord_user_id"], 0) + 1
+            )
 
         level_stats = [
-            {"level_number": l["level_number"], "name": l["level_name"], "count": level_counts.get(l["id"], 0)}
+            {
+                "level_number": l["level_number"],
+                "name": l["level_name"],
+                "count": level_counts.get(l["id"], 0),
+            }
             for l in levels
         ]
         sorted_asc = sorted(level_stats, key=lambda x: x["count"])
@@ -488,29 +606,47 @@ def run_poll(request: Request):
             for i, (uid, count) in enumerate(top_users)
         )
 
-        summary = "\n".join([
-            "📊 **Submission Summary**",
-            "",
-            f"**Approved this cycle:** {total_approved_this_cycle}",
-            f"**Total approved:** {total_approved}",
-            "",
-            "📉 **Levels with fewest submissions:**",
-            fmt(least10),
-            "",
-            "📈 **Levels with most submissions:**",
-            fmt(most10),
-            "",
-            "🏆 **Top contributors:**",
-            fmt_users,
-        ])
+        summary = "\n".join(
+            [
+                "📊 **Submission Summary**",
+                "",
+                f"**Approved this cycle:** {total_approved_this_cycle}",
+                f"**Total approved:** {total_approved}",
+                f"**Expired this cycle:** {total_stale}",
+                f"**Currently pending:** {pending_count}",
+                "",
+                "📉 **Levels with fewest submissions:**",
+                fmt(least10),
+                "",
+                "📈 **Levels with most submissions:**",
+                fmt(most10),
+                "",
+                "🏆 **Top contributors:**",
+                fmt_users,
+            ]
+        )
         send_message(REPORT_CHANNEL_ID, summary)
     else:
-        send_message(REPORT_CHANNEL_ID, "📊 **Submission Summary** — No approved submissions yet.")
+        send_message(
+            REPORT_CHANNEL_ID,
+            f"📊 **Submission Summary** — No approved submissions yet.\n"
+            f"**Expired this cycle:** {total_stale}\n"
+            f"**Currently pending:** {pending_count}",
+        )
 
     elapsed = round((time.time() - start) * 1000)
-    print(f"[poll-submissions] Done in {elapsed}ms — ingested: {total_ingested}, resolved: {total_resolved}, stale: {total_stale}")
+    print(
+        f"[poll-submissions] Done in {elapsed}ms — ingested: {total_ingested}, resolved: {total_resolved}, stale: {total_stale}"
+    )
 
-    return JSONResponse({"ok": True, "ingested": total_ingested, "resolved": total_resolved, "stale": total_stale})
+    return JSONResponse(
+        {
+            "ok": True,
+            "ingested": total_ingested,
+            "resolved": total_resolved,
+            "stale": total_stale,
+        }
+    )
 
 
 @app.get("/health")
