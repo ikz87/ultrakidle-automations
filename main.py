@@ -32,6 +32,7 @@ REPORT_CHANNEL_ID = "1481872631144775680"
 DISCORD_HEADERS = {
     "Authorization": f"Bot {BOT_TOKEN}",
     "Content-Type": "application/json",
+    "User-Agent": "DiscordBot (https://ultrakidle.online, 1.0)",
 }
 
 app = FastAPI()
