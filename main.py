@@ -526,8 +526,9 @@ def _run_refetch_submitters():
                 break
 
             if res.status_code == 429:
-                retry_after = float(
-                    res.headers.get("retry-after", "1")
+                retry_after = max(
+                    float(res.headers.get("retry-after", "1")),
+                    1.0,
                 )
                 print(
                     f"[refetch] Rate limited on {uid}, "
