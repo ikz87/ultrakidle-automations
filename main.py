@@ -11,6 +11,12 @@ from PIL import Image as PILImage
 from supabase import create_client
 from dotenv import load_dotenv
 
+import base64
+import math
+from concurrent.futures import ThreadPoolExecutor
+from fastapi import BackgroundTasks, Query
+from PIL import ImageDraw
+
 load_dotenv()
 
 BOT_TOKEN = os.environ["DISCORD_AUTOMATION_BOT_TOKEN"]
@@ -34,6 +40,27 @@ DISCORD_HEADERS = {
     "Content-Type": "application/json",
     "User-Agent": "DiscordBot (https://ultrakidle.online, 1.0)",
 }
+SUPABASE_FUNCTIONS_URL = f"{SUPABASE_URL}/functions/v1"
+
+
+_SCALE = 2
+_CELL = 16 * _SCALE
+_CELL_GAP = 3 * _SCALE
+_GRID_COLS = 6
+_GRID_ROWS = 5
+_GRID_W = _GRID_COLS * (_CELL + _CELL_GAP) - _CELL_GAP
+_GRID_H = _GRID_ROWS * (_CELL + _CELL_GAP) - _CELL_GAP
+_AVATAR_D = 48 * _SCALE
+_CARD_PAD = 12 * _SCALE
+_CARD_W = 3 * _CARD_PAD + _AVATAR_D + _GRID_W
+_CARD_H = _GRID_H + 2 * _CARD_PAD
+_CARD_GAP = 16 * _SCALE
+_IMG_PAD = 24 * _SCALE
+_COLOR_MAP = {"GREEN": "#00C950", "YELLOW": "#F0B100", "RED": "#FB2C36"}
+_DEFAULT_CELL = "#3a3a3c"
+_CARD_BG = "#0D0D0D"
+_BORDER = "#ffffff"
+_AVATAR_FB = "#444444"
 
 app = FastAPI()
 
@@ -47,912 +74,355 @@ def safe_json(res: requests.Response):
         )
         return None
 
+# ── Avatar helpers ──
 
-def discord_fetch(
-    url: str, method="GET", json=None
-) -> requests.Response:
-    for attempt in range(5):
+
+def _fetch_avatar(url: str, retries: int = 3) -> PILImage.Image | None:
+    for attempt in range(retries):
         try:
-            res = requests.request(
-                method,
-                url,
-                headers=DISCORD_HEADERS,
-                json=json,
-                timeout=15,
+            res = requests.get(url, timeout=10)
+            if res.ok:
+                return PILImage.open(io.BytesIO(res.content)).convert(
+                    "RGBA"
+                )
+        except Exception:
+            pass
+        if attempt < retries - 1:
+            time.sleep(1)
+    return None
+
+
+def _fetch_all_avatars(
+    urls: set[str],
+) -> dict[str, PILImage.Image | None]:
+    results: dict[str, PILImage.Image | None] = {}
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        futures = {pool.submit(_fetch_avatar, u): u for u in urls if u}
+        for f in futures:
+            results[futures[f]] = f.result()
+    return results
+
+
+def _circular_avatar(img: PILImage.Image, d: int) -> PILImage.Image:
+    img = img.resize((d, d), PILImage.LANCZOS)
+    mask = PILImage.new("L", (d, d), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, d - 1, d - 1), fill=255)
+    out = PILImage.new("RGBA", (d, d), (0, 0, 0, 0))
+    out.paste(img, mask=mask)
+    return out
+
+
+# ── Image rendering ──
+
+
+def _render_image(
+    results: list[dict],
+    avatars: dict[str, PILImage.Image | None],
+) -> bytes:
+    n = len(results)
+    best_cols = 1
+    best_diff = float("inf")
+    for c in range(1, n + 1):
+        rows = math.ceil(n / c)
+        w = 2 * _IMG_PAD + c * _CARD_W + (c - 1) * _CARD_GAP
+        h = 2 * _IMG_PAD + rows * _CARD_H + (rows - 1) * _CARD_GAP
+        diff = abs(w / h - 16 / 9)
+        if diff < best_diff:
+            best_diff = diff
+            best_cols = c
+
+    cols = best_cols
+    total_rows = math.ceil(n / cols)
+    tw = 2 * _IMG_PAD + cols * _CARD_W + (cols - 1) * _CARD_GAP
+    th = 2 * _IMG_PAD + total_rows * _CARD_H + (total_rows - 1) * _CARD_GAP
+
+    img = PILImage.new("RGBA", (tw, th), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    for i, r in enumerate(results):
+        col = i % cols
+        row = i // cols
+        cx = _IMG_PAD + col * (_CARD_W + _CARD_GAP)
+        cy = _IMG_PAD + row * (_CARD_H + _CARD_GAP)
+
+        draw.rectangle(
+            [cx, cy, cx + _CARD_W, cy + _CARD_H],
+            fill=_CARD_BG,
+            outline=_BORDER,
+            width=_SCALE,
+        )
+
+        ax = cx + _CARD_PAD
+        ay = cy + (_CARD_H - _AVATAR_D) // 2
+        avatar_url = r.get("avatar_url", "")
+        avatar_img = avatars.get(avatar_url) if avatar_url else None
+
+        if avatar_img:
+            circ = _circular_avatar(avatar_img, _AVATAR_D)
+            img.paste(circ, (ax, ay), circ)
+        else:
+            draw.ellipse(
+                [ax, ay, ax + _AVATAR_D, ay + _AVATAR_D],
+                fill=_AVATAR_FB,
             )
-            if res.ok or res.status_code == 404:
-                return res
-            if res.status_code == 429:
-                data = safe_json(res)
-                retry_after = (
-                    data.get("retry_after", 1) if data else 1
-                )
-                print(
-                    f"[discord] 429, retrying in {retry_after}s"
-                )
-                time.sleep(retry_after)
-                continue
-            if res.status_code >= 500:
-                backoff = 1 * (2**attempt)
-                print(
-                    f"[discord] {res.status_code} on {url}, "
-                    f"retrying in {backoff}s"
-                )
-                time.sleep(backoff)
-                continue
-            return res
-        except Exception as e:
-            print(f"[discord] Request error on attempt {attempt}: {e}")
-            time.sleep(1 * (2**attempt))
-    raise RuntimeError(f"[discord] All retries exhausted for {url}")
 
-
-def send_message(channel_id: str, content: str):
-    res = discord_fetch(
-        f"{DISCORD_API}/channels/{channel_id}/messages",
-        method="POST",
-        json={"content": content},
-    )
-    if not res.ok:
-        print(
-            f"[msg] Failed in {channel_id}: {res.status_code}"
+        draw.ellipse(
+            [ax, ay, ax + _AVATAR_D, ay + _AVATAR_D],
+            outline=_BORDER,
+            width=2 * _SCALE,
         )
 
+        gx = cx + 2 * _CARD_PAD + _AVATAR_D
+        gy = cy + _CARD_PAD
+        colors = r.get("colors") or []
 
-def close_thread(thread_id: str):
-    res = discord_fetch(
-        f"{DISCORD_API}/channels/{thread_id}",
-        method="PATCH",
-        json={"archived": True, "locked": True},
+        for gr in range(_GRID_ROWS):
+            for gc in range(_GRID_COLS):
+                x = gx + gc * (_CELL + _CELL_GAP)
+                y = gy + gr * (_CELL + _CELL_GAP)
+                fill = _DEFAULT_CELL
+                if gr < len(colors) and gc < len(colors[gr]):
+                    hint = colors[gr][gc]
+                    if hint in _COLOR_MAP:
+                        fill = _COLOR_MAP[hint]
+                draw.rectangle([x, y, x + _CELL, y + _CELL], fill=fill)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+# ── Message formatting ──
+
+
+def _format_message(data: dict) -> str:
+    grouped: dict[str, list[str]] = {}
+    for r in data["results"]:
+        key = f"{r['attempts']}/5" if r["is_win"] else "X/5"
+        grouped.setdefault(key, []).append(r["name"])
+
+    sorted_groups = sorted(
+        grouped.items(),
+        key=lambda kv: 99 if kv[0] == "X/5" else int(kv[0][0]),
     )
-    if not res.ok:
-        print(
-            f"[thread] Failed to close {thread_id}: "
-            f"{res.status_code}"
-        )
 
+    best_key = sorted_groups[0][0]
+    lines = []
+    for key, names in sorted_groups:
+        prefix = "👑 " if key == best_key and key != "X/5" else ""
+        lines.append(f"{prefix}{key}: {'  '.join(names)}")
 
-def add_reaction(
-    channel_id: str, message_id: str, emoji: str
-):
-    encoded = requests.utils.quote(emoji, safe="")
-    res = discord_fetch(
-        f"{DISCORD_API}/channels/{channel_id}/messages/"
-        f"{message_id}/reactions/{encoded}/@me",
-        method="PUT",
-    )
-    if not res.ok:
-        print(
-            f"[react] Failed to add {emoji} to "
-            f"{message_id}: {res.status_code}"
-        )
+    streak = data.get("streak", 0)
+    if streak == 1:
+        streak_line = "The streak begins... 👀 "
+    elif streak > 1:
+        streak_line = f"This server is on a {streak} day streak! 🔥"
+    else:
+        streak_line = ""
 
-
-def remove_reaction(
-    channel_id: str, message_id: str, emoji: str
-):
-    encoded = requests.utils.quote(emoji, safe="")
-    res = discord_fetch(
-        f"{DISCORD_API}/channels/{channel_id}/messages/"
-        f"{message_id}/reactions/{encoded}/@me",
-        method="DELETE",
-    )
-    if not res.ok and res.status_code != 404:
-        print(
-            f"[react] Failed to remove {emoji} from "
-            f"{message_id}: {res.status_code}"
-        )
-
-
-def reject_thread(
-    thread_id: str, message_id: str, reason: str
-):
-    add_reaction(thread_id, message_id, "❌")
-    send_message(
-        thread_id, f"❌ **Submission rejected** — {reason}"
-    )
-    close_thread(thread_id)
-
-
-def get_reaction_users(
-    channel_id: str, message_id: str, emoji: str
-) -> list[str]:
-    encoded = requests.utils.quote(emoji, safe="")
-    res = discord_fetch(
-        f"{DISCORD_API}/channels/{channel_id}/messages/"
-        f"{message_id}/reactions/{encoded}?limit=100"
-    )
-    data = safe_json(res)
-    if not data or not isinstance(data, list):
-        return []
-    return [
-        u["id"] for u in data if u.get("id") != BOT_USER_ID
-    ]
-
-
-def get_active_forum_threads(
-    guild_id: str, forum_channel_id: str
-) -> list:
-    res = discord_fetch(
-        f"{DISCORD_API}/guilds/{guild_id}/threads/active"
-    )
-    data = safe_json(res)
-    if not data:
-        return []
-    return [
-        t
-        for t in data.get("threads", [])
-        if t["parent_id"] == forum_channel_id
-        and not t.get("thread_metadata", {}).get(
-            "archived", False
-        )
-    ]
-
-
-def get_starter_message(thread_id: str) -> dict | None:
-    res = discord_fetch(
-        f"{DISCORD_API}/channels/{thread_id}/messages/{thread_id}"
-    )
-    if not res.ok:
-        return None
-    return safe_json(res)
-
-
-def download_image(url: str) -> bytes:
-    res = requests.get(url, timeout=20)
-    if not res.ok:
-        raise RuntimeError(
-            f"Failed to download image: {res.status_code}"
-        )
-    return res.content
-
-
-def is_aspect_ratio_16x9(width: int, height: int) -> bool:
-    return abs(width / height - 16 / 9) < ASPECT_TOLERANCE
-
-
-def discord_avatar_url(
-    user_id: str, avatar_hash: str | None
-) -> str:
-    if not avatar_hash:
-        index = (int(user_id) >> 22) % 6
-        return (
-            f"https://cdn.discordapp.com/embed/avatars/"
-            f"{index}.png"
-        )
-    ext = "gif" if avatar_hash.startswith("a_") else "png"
+    day = data.get("day_number", "?")
     return (
-        f"https://cdn.discordapp.com/avatars/"
-        f"{user_id}/{avatar_hash}.{ext}"
+        f"🔴 ULTRAKIDLE #{day} has ended!\n{streak_line}\n"
+        f"Here are yesterday's results:\n"
+        + "\n".join(lines)
+        + "\n\nA new enemy is waiting!"
     )
 
 
-def is_image_attachment(a: dict) -> bool:
-    if (a.get("content_type") or "").startswith("image/"):
-        return True
-    return bool(
-        re.search(
-            r"\.(png|jpe?g|webp|gif)$",
-            a.get("filename") or "",
-            re.IGNORECASE,
+# ── Supabase + Edge function calls ──
+
+
+def _rpc_guild_summary(guild_id: str) -> dict | None:
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    while True:
+        try:
+            res = sb.rpc(
+                "get_guild_daily_summary", {"p_guild_id": guild_id}
+            ).execute()
+            return res.data
+        except Exception as e:
+            print(f"[{guild_id}] RPC error: {e}, retrying in 2s")
+            time.sleep(2)
+
+
+def _send_via_edge(
+    channel_id: str, message: str, png_b64: str | None = None
+) -> bool:
+    payload: dict = {"channel_id": channel_id, "message": message}
+    if png_b64:
+        payload["png_base64"] = png_b64
+
+    while True:
+        try:
+            res = requests.post(
+                f"{SUPABASE_FUNCTIONS_URL}/send-daily-message",
+                headers={
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=120,
+            )
+            data = safe_json(res)
+            if data and data.get("ok"):
+                return True
+            # 502 = edge function forwarded a non-retryable Discord error
+            if res.status_code == 502:
+                print(
+                    f"[{channel_id}] Discord rejected: "
+                    f"{data.get('error') if data else res.text[:200]}"
+                )
+                return False
+            print(
+                f"[{channel_id}] Edge error {res.status_code}, "
+                "retrying in 3s"
+            )
+            time.sleep(3)
+        except Exception as e:
+            print(f"[{channel_id}] Request error: {e}, retrying in 5s")
+            time.sleep(5)
+
+
+# ── Orchestrator ──
+
+
+def _run_daily_notifications(
+    filter_channel: str | None, test_channel: str | None
+):
+    started = time.time()
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+    query = sb.from_("daily_notification_channels").select(
+        "guild_id, channel_id"
+    )
+    if filter_channel:
+        query = query.eq("channel_id", filter_channel)
+    channels = query.execute().data or []
+
+    if not channels:
+        print("[daily] No channels found")
+        return
+
+    # Deduplicate guilds
+    guild_channels: dict[str, list[str]] = {}
+    for row in channels:
+        guild_channels.setdefault(row["guild_id"], []).append(
+            row["channel_id"]
         )
+
+    print(
+        f"[daily] {len(channels)} channels across "
+        f"{len(guild_channels)} guilds"
     )
 
+    # Fetch all guild summaries (concurrency-limited)
+    summaries: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {
+            pool.submit(_rpc_guild_summary, gid): gid
+            for gid in guild_channels
+        }
+        for f in futures:
+            gid = futures[f]
+            data = f.result()
+            if data and data.get("results"):
+                summaries[gid] = data
 
-@app.post("/run")
-def run_poll(request: Request):
-    auth = request.headers.get("Authorization")
-    if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
-        return JSONResponse(
-            {"error": "Unauthorized"}, status_code=401
-        )
-
-    start = time.time()
-    print("[poll-submissions] Starting run")
-
-    supabase = create_client(
-        SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+    print(
+        f"[daily] {len(summaries)} guilds with results "
+        f"(skipped {len(guild_channels) - len(summaries)})"
     )
 
-    levels_res = (
-        supabase.table("levels")
-        .select("id, level_number, level_name")
-        .execute()
-    )
-    levels = levels_res.data
-    if not levels:
-        print("[init] No levels found")
-        return JSONResponse(
-            {"error": "No levels found"}, status_code=500
-        )
+    if not summaries:
+        print("[daily] Nothing to send")
+        return
 
-    print(f"[init] Loaded {len(levels)} levels")
-    level_map = {l["level_number"]: l["id"] for l in levels}
+    # Collect unique avatar URLs and fetch them all
+    avatar_urls: set[str] = set()
+    for data in summaries.values():
+        for r in data["results"]:
+            url = r.get("avatar_url")
+            if url:
+                avatar_urls.add(url)
 
-    forums_res = (
-        supabase.table("submission_forums")
-        .select("channel_id, guild_id")
-        .execute()
-    )
-    forums = forums_res.data
-    if not forums:
-        print("[init] No tracked forums")
-        return JSONResponse(
-            {
-                "ok": True,
-                "ingested": 0,
-                "resolved": 0,
-                "stale": 0,
-            }
-        )
+    print(f"[daily] Fetching {len(avatar_urls)} unique avatars")
+    avatars = _fetch_all_avatars(avatar_urls)
 
-    print(f"[init] Tracking {len(forums)} forum(s)")
+    # Render images and format messages per guild
+    guild_payloads: dict[str, tuple[str, str]] = {}  # gid -> (msg, png_b64)
+    for gid, data in summaries.items():
+        msg = _format_message(data)
+        png = _render_image(data["results"], avatars)
+        png_b64 = base64.b64encode(png).decode()
+        guild_payloads[gid] = (msg, png_b64)
 
-    total_ingested = 0
-    total_resolved = 0
-    total_approved_this_cycle = 0
-    total_stale = 0
+    print(f"[daily] Rendered {len(guild_payloads)} images, sending...")
 
-    # --- PHASE 1: Ingest ---
-    for forum in forums:
-        print(
-            f"[ingest] Discovering threads in forum "
-            f"{forum['channel_id']}"
-        )
-        active_threads = get_active_forum_threads(
-            forum["guild_id"], forum["channel_id"]
-        )
-        print(
-            f"[ingest] Found {len(active_threads)} active "
-            f"thread(s)"
-        )
+    # Send sequentially
+    succeeded = 0
+    failed = 0
+    skipped = len(guild_channels) - len(summaries)
+    failures: list[str] = []
 
-        thread_ids = [t["id"] for t in active_threads]
-        if not thread_ids:
+    for gid, ch_ids in guild_channels.items():
+        if gid not in guild_payloads:
             continue
 
-        existing_res = (
-            supabase.table("image_submissions")
-            .select("message_id")
-            .in_("message_id", thread_ids)
-            .execute()
-        )
-        rejected_res = (
-            supabase.table("rejected_threads")
-            .select("thread_id")
-            .in_("thread_id", thread_ids)
-            .execute()
+        msg, png_b64 = guild_payloads[gid]
+        targets = (
+            [test_channel] if test_channel else ch_ids
         )
 
-        existing_ids = {
-            e["message_id"]
-            for e in (existing_res.data or [])
-        }
-        rejected_ids = {
-            r["thread_id"]
-            for r in (rejected_res.data or [])
-        }
-
-        new_threads = [
-            t
-            for t in active_threads
-            if t["id"] not in existing_ids
-            and t["id"] not in rejected_ids
-        ][:INGEST_BATCH_SIZE]
-
-        print(
-            f"[ingest] {len(new_threads)} new thread(s) to "
-            f"process"
-        )
-
-        for thread in new_threads:
-            try:
-                time.sleep(1)
-                title = (thread.get("name") or "").strip()
-                match = LEVEL_PATTERN.match(title)
-                if not match:
-                    print(
-                        f"[ingest] Rejecting {thread['id']} "
-                        f'— invalid title: "{title}"'
-                    )
-                    reject_thread(
-                        thread["id"],
-                        thread["id"],
-                        f"Post title must be exactly a level "
-                        f"name (e.g. `2-1`, `P-2`, `0-E`, "
-                        f"`7-S`). Got: `{title}`",
-                    )
-                    supabase.table(
-                        "rejected_threads"
-                    ).insert(
-                        {"thread_id": thread["id"]}
-                    ).execute()
-                    continue
-
-                level_number = match.group(1).upper()
-                level_id = level_map.get(level_number)
-                if not level_id:
-                    print(
-                        f"[ingest] Rejecting {thread['id']} "
-                        f'— unknown level "{level_number}"'
-                    )
-                    reject_thread(
-                        thread["id"],
-                        thread["id"],
-                        f"Level `{level_number}` was not "
-                        f"found in the database.",
-                    )
-                    supabase.table(
-                        "rejected_threads"
-                    ).insert(
-                        {"thread_id": thread["id"]}
-                    ).execute()
-                    continue
-
-                msg = get_starter_message(thread["id"])
-                if not msg:
-                    print(
-                        f"[ingest] Closing {thread['id']} "
-                        f"— no starter message"
-                    )
-                    close_thread(thread["id"])
-                    continue
-
-                image_attachments = [
-                    a
-                    for a in (msg.get("attachments") or [])
-                    if is_image_attachment(a)
-                ]
-                if len(image_attachments) == 0:
-                    print(
-                        f"[ingest] Rejecting {thread['id']} "
-                        f"— no image"
-                    )
-                    reject_thread(
-                        thread["id"],
-                        thread["id"],
-                        "The first message must contain "
-                        "exactly one image attachment.",
-                    )
-                    supabase.table(
-                        "rejected_threads"
-                    ).insert(
-                        {"thread_id": thread["id"]}
-                    ).execute()
-                    continue
-                if len(image_attachments) > 1:
-                    print(
-                        f"[ingest] Rejecting {thread['id']} "
-                        f"— {len(image_attachments)} images"
-                    )
-                    reject_thread(
-                        thread["id"],
-                        thread["id"],
-                        f"The first message must contain "
-                        f"exactly one image. Found "
-                        f"{len(image_attachments)}.",
-                    )
-                    supabase.table(
-                        "rejected_threads"
-                    ).insert(
-                        {"thread_id": thread["id"]}
-                    ).execute()
-                    continue
-
-                attachment = image_attachments[0]
-                image_data = download_image(
-                    attachment["url"]
-                )
-                img = PILImage.open(io.BytesIO(image_data))
-                if not is_aspect_ratio_16x9(
-                    img.width, img.height
-                ):
-                    print(
-                        f"[ingest] Rejecting {thread['id']} "
-                        f"— not 16:9 "
-                        f"({img.width}x{img.height})"
-                    )
-                    reject_thread(
-                        thread["id"],
-                        thread["id"],
-                        f"Image must be 16:9 aspect ratio. "
-                        f"Got {img.width}×{img.height}.",
-                    )
-                    supabase.table(
-                        "rejected_threads"
-                    ).insert(
-                        {"thread_id": thread["id"]}
-                    ).execute()
-                    continue
-
-                author = msg["author"]
-                display_name = (
-                    author.get("global_name")
-                    or author["username"]
-                )
-
-                supabase.table("image_submissions").insert(
-                    {
-                        "guild_id": forum["guild_id"],
-                        "channel_id": thread["id"],
-                        "message_id": thread["id"],
-                        "discord_user_id": author["id"],
-                        "discord_name": display_name,
-                        "discord_avatar_url": discord_avatar_url(
-                            author["id"],
-                            author.get("avatar"),
-                        ),
-                        "level_id": level_id,
-                        "image_url": attachment["url"],
-                    }
-                ).execute()
-
-                print(
-                    f"[ingest] ✓ Ingested {thread['id']} "
-                    f"— level {level_number} by "
-                    f"{display_name}"
-                )
-                add_reaction(
-                    thread["id"], thread["id"], "👀"
-                )
-                total_ingested += 1
-
-            except Exception as e:
-                print(
-                    f"[ingest] Unexpected error for thread "
-                    f"{thread['id']}: {e}"
-                )
-                try:
-                    close_thread(thread["id"])
-                except Exception:
-                    pass
-
-    # --- PHASE 2: Resolve ---
-    pending_res = (
-        supabase.table("image_submissions")
-        .select("*")
-        .eq("status", "pending")
-        .order("created_at", desc=False)
-        .limit(RESOLVE_BATCH_SIZE)
-        .execute()
-    )
-    pending = pending_res.data or []
-    print(
-        f"[resolve] {len(pending)} pending submission(s) "
-        f"to check"
-    )
-
-    for sub in pending:
-        try:
-            time.sleep(1)
-            thread_res = discord_fetch(
-                f"{DISCORD_API}/channels/{sub['channel_id']}"
-            )
-            if not thread_res.ok:
-                print(
-                    f"[resolve] Failed thread fetch "
-                    f"{sub['channel_id']}: "
-                    f"{thread_res.status_code}"
-                )
-                continue
-
-            thread_data = safe_json(thread_res)
-            if not thread_data:
-                continue
-
-            current_title = (
-                (thread_data.get("name") or "")
-                .strip()
-                .upper()
-            )
-            level_match = LEVEL_PATTERN.match(current_title)
-            level_id = (
-                level_map.get(level_match.group(1))
-                if level_match
-                else None
-            )
-
-            if not level_id:
-                print(
-                    f"[resolve] Rejecting #{sub['id']} - "
-                    f"title edited to invalid"
-                )
-                reject_thread(
-                    sub["channel_id"],
-                    sub["message_id"],
-                    f"Title edited to invalid level: "
-                    f'"{current_title}"',
-                )
-                supabase.table("image_submissions").update(
-                    {
-                        "status": "rejected",
-                        "resolved_at": datetime.now(
-                            timezone.utc
-                        ).isoformat(),
-                    }
-                ).eq("id", sub["id"]).execute()
-                total_resolved += 1
-                continue
-
-            if level_id != sub["level_id"]:
-                supabase.table("image_submissions").update(
-                    {"level_id": level_id}
-                ).eq("id", sub["id"]).execute()
-                sub["level_id"] = level_id
-
-            up_users = get_reaction_users(
-                sub["channel_id"], sub["message_id"], "👍"
-            )
-            down_users = get_reaction_users(
-                sub["channel_id"], sub["message_id"], "👎"
-            )
-            up, down = len(up_users), len(down_users)
-
-            supabase.table("image_submissions").update(
-                {"thumbs_up": up, "thumbs_down": down}
-            ).eq("id", sub["id"]).execute()
-
-            if (
-                up < REACTION_THRESHOLD
-                and down < REACTION_THRESHOLD
-            ):
-                print(
-                    f"[resolve] #{sub['id']} — {up}👍 "
-                    f"{down}👎 (need "
-                    f"{REACTION_THRESHOLD}), skipping"
-                )
-                continue
-
-            if up > down:
-                fresh_msg = get_starter_message(
-                    sub["channel_id"]
-                )
-                fresh_attachment = next(
-                    (
-                        a
-                        for a in (
-                            fresh_msg.get("attachments")
-                            or []
-                        )
-                        if is_image_attachment(a)
-                    ),
-                    None,
-                )
-                if not fresh_attachment:
-                    print(
-                        f"[resolve] #{sub['id']} — image "
-                        f"no longer available"
-                    )
-                    reject_thread(
-                        sub["channel_id"],
-                        sub["message_id"],
-                        "Original image is no longer "
-                        "available.",
-                    )
-                    supabase.table(
-                        "image_submissions"
-                    ).update(
-                        {
-                            "status": "rejected",
-                            "resolved_at": datetime.now(
-                                timezone.utc
-                            ).isoformat(),
-                        }
-                    ).eq(
-                        "id", sub["id"]
-                    ).execute()
-                    total_resolved += 1
-                    continue
-
-                image_data = download_image(
-                    fresh_attachment["url"]
-                )
-                img = PILImage.open(
-                    io.BytesIO(image_data)
-                ).convert("RGB")
-                resized = img.resize(
-                    (TARGET_WIDTH, TARGET_HEIGHT),
-                    PILImage.LANCZOS,
-                )
-                buf = io.BytesIO()
-                resized.save(
-                    buf, format="JPEG", quality=90
-                )
-                jpeg_data = buf.getvalue()
-
-                level_number = next(
-                    (
-                        l["level_number"]
-                        for l in levels
-                        if l["id"] == sub["level_id"]
-                    ),
-                    None,
-                )
-                storage_path = (
-                    f"{level_number}/{sub['id']}.jpg"
-                )
-
-                supabase.storage.from_(
-                    "level-images"
-                ).upload(
-                    storage_path,
-                    jpeg_data,
-                    {
-                        "content-type": "image/jpeg",
-                        "upsert": "false",
-                    },
-                )
-
-                remove_reaction(
-                    sub["channel_id"],
-                    sub["message_id"],
-                    "👀",
-                )
-                add_reaction(
-                    sub["channel_id"],
-                    sub["message_id"],
-                    "✅",
-                )
-                send_message(
-                    sub["channel_id"],
-                    "✅ **Submission approved!** "
-                    "Added to gallery.",
-                )
-                close_thread(sub["channel_id"])
-
-                supabase.table("image_submissions").update(
-                    {
-                        "status": "approved",
-                        "storage_path": storage_path,
-                        "resolved_at": datetime.now(
-                            timezone.utc
-                        ).isoformat(),
-                    }
-                ).eq("id", sub["id"]).execute()
-
-                total_resolved += 1
-                total_approved_this_cycle += 1
-                print(
-                    f"[resolve] ✓ Approved #{sub['id']} "
-                    f"— {up}👍 {down}👎"
-                )
-
+        for ch_id in targets:
+            ok = _send_via_edge(ch_id, msg, png_b64)
+            if ok:
+                succeeded += 1
             else:
-                supabase.table("image_submissions").update(
-                    {
-                        "status": "rejected",
-                        "resolved_at": datetime.now(
-                            timezone.utc
-                        ).isoformat(),
-                    }
-                ).eq("id", sub["id"]).execute()
-                remove_reaction(
-                    sub["channel_id"],
-                    sub["message_id"],
-                    "👀",
-                )
-                add_reaction(
-                    sub["channel_id"],
-                    sub["message_id"],
-                    "❌",
-                )
-                send_message(
-                    sub["channel_id"],
-                    "❌ **Submission rejected** by vote.",
-                )
-                close_thread(sub["channel_id"])
-                total_resolved += 1
-                print(
-                    f"[resolve] ✗ Rejected #{sub['id']} "
-                    f"— {up}👍 {down}👎"
-                )
+                failed += 1
+                failures.append(ch_id)
 
-        except Exception as e:
-            print(
-                f"[resolve] Unexpected error for "
-                f"#{sub['id']}: {e}"
-            )
-            try:
-                supabase.table("image_submissions").update(
-                    {
-                        "status": "rejected",
-                        "resolved_at": datetime.now(
-                            timezone.utc
-                        ).isoformat(),
-                    }
-                ).eq("id", sub["id"]).execute()
-                close_thread(sub["channel_id"])
-            except Exception:
-                pass
-            total_resolved += 1
-
-    # --- PHASE 2.5: Stale ---
-    two_days_ago = (
-        datetime.now(timezone.utc) - timedelta(days=2)
-    ).isoformat()
-    stale_res = (
-        supabase.table("image_submissions")
-        .select("*")
-        .eq("status", "pending")
-        .lt("created_at", two_days_ago)
-        .order("created_at", desc=False)
-        .execute()
+    elapsed = round(time.time() - started, 1)
+    report = (
+        f"[daily] Done in {elapsed}s — "
+        f"{succeeded} sent, {skipped} skipped, {failed} failed"
     )
-    stale = stale_res.data or []
-    print(
-        f"[stale] {len(stale)} stale submission(s) to "
-        f"archive"
+    print(report)
+    if failures:
+        print(f"[daily] Failed channels: {', '.join(failures)}")
+
+    # Send report to report channel
+    report_msg = (
+        f"📊 **Daily notification report**\n"
+        f"Sent: {succeeded} | Skipped: {skipped} | Failed: {failed}\n"
+        f"Duration: {elapsed}s"
     )
+    if failures:
+        report_msg += f"\nFailed: {', '.join(failures)}"
+    _send_via_edge(REPORT_CHANNEL_ID, report_msg)
 
-    for sub in stale:
-        try:
-            time.sleep(1)
-            remove_reaction(
-                sub["channel_id"], sub["message_id"], "👀"
-            )
-            send_message(
-                sub["channel_id"],
-                "⏰ **Submission expired** — This thread "
-                "has been open for over 2 days without "
-                "reaching the vote threshold. Feel free "
-                "to resubmit!",
-            )
-            close_thread(sub["channel_id"])
-            supabase.table("image_submissions").update(
-                {
-                    "status": "expired",
-                    "resolved_at": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                }
-            ).eq("id", sub["id"]).execute()
-            print(f"[stale] ✓ Archived #{sub['id']}")
-            total_stale += 1
-            total_resolved += 1
-        except Exception as e:
-            print(f"[stale] Error for #{sub['id']}: {e}")
 
-    # --- PHASE 3: Summary ---
-    approved_res = (
-        supabase.table("image_submissions")
-        .select("id, level_id, discord_user_id")
-        .eq("status", "approved")
-        .execute()
+# ── Endpoint ──
+
+
+@app.post("/cron/daily-notifications")
+def daily_notifications(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    filter_channel: str | None = Query(
+        None, description="Only process this channel's guild"
+    ),
+    test_channel: str | None = Query(
+        None, description="Redirect ALL sends to this channel"
+    ),
+):
+    auth = request.headers.get("Authorization")
+    if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, 401)
+
+    background_tasks.add_task(
+        _run_daily_notifications, filter_channel, test_channel
     )
-    approved_subs = approved_res.data or []
-
-    pending_count_res = (
-        supabase.table("image_submissions")
-        .select("id", count="exact")
-        .eq("status", "pending")
-        .execute()
-    )
-    pending_count = pending_count_res.count or 0
-
-    if approved_subs:
-        total_approved = len(approved_subs)
-        level_counts: dict[str, int] = {}
-        user_counts: dict[str, int] = {}
-
-        for s in approved_subs:
-            level_counts[s["level_id"]] = (
-                level_counts.get(s["level_id"], 0) + 1
-            )
-            user_counts[s["discord_user_id"]] = (
-                user_counts.get(s["discord_user_id"], 0)
-                + 1
-            )
-
-        level_stats = [
-            {
-                "level_number": l["level_number"],
-                "name": l["level_name"],
-                "count": level_counts.get(l["id"], 0),
-            }
-            for l in levels
-        ]
-        sorted_asc = sorted(
-            level_stats, key=lambda x: x["count"]
-        )
-        sorted_desc = sorted(
-            level_stats,
-            key=lambda x: x["count"],
-            reverse=True,
-        )
-        least10 = sorted_asc[:10]
-        most10 = sorted_desc[:10]
-
-        top_users = sorted(
-            user_counts.items(),
-            key=lambda x: x[1],
-            reverse=True,
-        )[:5]
-        user_names: dict[str, str] = {}
-        for user_id, _ in top_users:
-            try:
-                res = discord_fetch(
-                    f"{DISCORD_API}/users/{user_id}"
-                )
-                if res.ok:
-                    u = safe_json(res)
-                    if u:
-                        user_names[user_id] = (
-                            u.get("global_name")
-                            or u["username"]
-                        )
-                    else:
-                        user_names[user_id] = (
-                            f"Unknown User ({user_id})"
-                        )
-                else:
-                    user_names[user_id] = (
-                        f"Unknown User ({user_id})"
-                    )
-            except Exception:
-                user_names[user_id] = (
-                    f"Unknown User ({user_id})"
-                )
-
-        def fmt(lst):
-            return "\n".join(
-                f"{i + 1}. **{l['level_number']}** — "
-                f"{l['name']} ({l['count']})"
-                for i, l in enumerate(lst)
-            )
-
-        fmt_users = "\n".join(
-            f"{i + 1}. **{user_names.get(uid)}** — "
-            f"{count} approved submission"
-            f"{'s' if count != 1 else ''}"
-            for i, (uid, count) in enumerate(top_users)
-        )
-
-        summary = "\n".join(
-            [
-                "📊 **Submission Summary**",
-                "",
-                f"**Approved this cycle:** "
-                f"{total_approved_this_cycle}",
-                f"**Total approved:** {total_approved}",
-                f"**Expired this cycle:** {total_stale}",
-                f"**Currently pending:** {pending_count}",
-                "",
-                "📉 **Levels with fewest submissions:**",
-                fmt(least10),
-                "",
-                "📈 **Levels with most submissions:**",
-                fmt(most10),
-                "",
-                "🏆 **Top contributors:**",
-                fmt_users,
-            ]
-        )
-        send_message(REPORT_CHANNEL_ID, summary)
-    else:
-        send_message(
-            REPORT_CHANNEL_ID,
-            f"📊 **Submission Summary** — No approved "
-            f"submissions yet.\n"
-            f"**Expired this cycle:** {total_stale}\n"
-            f"**Currently pending:** {pending_count}",
-        )
-
-    elapsed = round((time.time() - start) * 1000)
-    print(
-        f"[poll-submissions] Done in {elapsed}ms — "
-        f"ingested: {total_ingested}, "
-        f"resolved: {total_resolved}, "
-        f"stale: {total_stale}"
-    )
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "ingested": total_ingested,
-            "resolved": total_resolved,
-            "stale": total_stale,
-        }
-    )
+    return {"ok": True, "status": "started"}
 
 
 @app.get("/health")
