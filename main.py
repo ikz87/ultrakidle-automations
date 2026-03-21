@@ -44,6 +44,80 @@ SUPABASE_FUNCTIONS_URL = f"{SUPABASE_URL}/functions/v1"
 SUBMISSIONS_BATCH_SIZE = 10
 SUBMISSIONS_REPORT_CHANNEL_ID = "1481872631144775680"
 
+DAILY_COMPONENTS = [
+    {
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 2,
+                "label": "Play on Discord",
+                "custom_id": "launch_activity",
+                "emoji": {"name": "🎮"},
+            },
+            {
+                "type": 2,
+                "style": 5,
+                "label": "Open in browser",
+                "url": "https://ultrakidle.online/",
+                "emoji": {"name": "🌐"},
+            },
+        ],
+    },
+]
+
+
+def _send_message(
+    channel_id: str,
+    message: str | None = None,
+    *,
+    bot: str = "main",
+    components: list[dict] | None = None,
+    attachments: list[dict] | None = None,
+) -> bool:
+    """
+    Send a message via the send-message edge function.
+
+    attachments: list of {"base64": str, "filename": str, "content_type": str}
+    bot: "main" or "automation"
+    """
+    payload: dict = {"channel_id": channel_id, "bot": bot}
+    if message:
+        payload["message"] = message
+    if components:
+        payload["components"] = components
+    if attachments:
+        payload["attachments"] = attachments
+
+    while True:
+        try:
+            res = requests.post(
+                f"{SUPABASE_FUNCTIONS_URL}/send-message",
+                headers={
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=120,
+            )
+            data = safe_json(res)
+            if data and data.get("ok"):
+                return True
+            if res.status_code == 502:
+                print(
+                    f"[{channel_id}] Discord rejected: "
+                    f"{data.get('error') if data else res.text[:200]}"
+                )
+                return False
+            print(
+                f"[{channel_id}] Edge error {res.status_code}, "
+                "retrying in 3s"
+            )
+            time.sleep(3)
+        except Exception as e:
+            print(f"[{channel_id}] Request error: {e}, retrying in 5s")
+            time.sleep(5)
+
 
 _SCALE = 2
 _CELL = 16 * _SCALE
@@ -277,43 +351,6 @@ def _rpc_guild_summary(guild_id: str) -> dict | None:
             time.sleep(2)
 
 
-def _send_via_edge(
-    channel_id: str, message: str, png_b64: str | None = None
-) -> bool:
-    payload: dict = {"channel_id": channel_id, "message": message}
-    if png_b64:
-        payload["png_base64"] = png_b64
-
-    while True:
-        try:
-            res = requests.post(
-                f"{SUPABASE_FUNCTIONS_URL}/send-daily-message",
-                headers={
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=120,
-            )
-            data = safe_json(res)
-            if data and data.get("ok"):
-                return True
-            # 502 = edge function forwarded a non-retryable Discord error
-            if res.status_code == 502:
-                print(
-                    f"[{channel_id}] Discord rejected: "
-                    f"{data.get('error') if data else res.text[:200]}"
-                )
-                return False
-            print(
-                f"[{channel_id}] Edge error {res.status_code}, "
-                "retrying in 3s"
-            )
-            time.sleep(3)
-        except Exception as e:
-            print(f"[{channel_id}] Request error: {e}, retrying in 5s")
-            time.sleep(5)
-
 
 # ── Orchestrator ──
 
@@ -396,19 +433,32 @@ def _run_daily_notifications(
     skipped = len(guild_channels) - len(summaries)
     failures: list[str] = []
 
-    send_tasks: list[tuple[str, str, str]] = []  # (ch_id, msg, png_b64)
+    send_tasks: list[tuple[str, str, list[dict]]] = []
     for gid, ch_ids in guild_channels.items():
         if gid not in guild_payloads:
             continue
         msg, png_b64 = guild_payloads[gid]
+        img_attachment = [
+            {
+                "base64": png_b64,
+                "filename": "results.png",
+                "content_type": "image/png",
+            }
+        ]
         targets = [test_channel] if test_channel else ch_ids
         for ch_id in targets:
-            send_tasks.append((ch_id, msg, png_b64))
+            send_tasks.append((ch_id, msg, img_attachment))
 
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
-            pool.submit(_send_via_edge, ch, msg, png): ch
-            for ch, msg, png in send_tasks
+            pool.submit(
+                _send_message,
+                ch,
+                msg,
+                components=DAILY_COMPONENTS,
+                attachments=atts,
+            ): ch
+            for ch, msg, atts in send_tasks
         }
         for f in futures:
             ch = futures[f]
@@ -435,7 +485,7 @@ def _run_daily_notifications(
     )
     if failures:
         report_msg += f"\nFailed: {', '.join(failures)}"
-    _send_via_edge(REPORT_CHANNEL_ID, report_msg)
+    _send_message(REPORT_CHANNEL_ID, report_msg, bot="automation")
 
 def _run_refetch_submitters():
     started = time.time()
@@ -543,7 +593,7 @@ def _run_refetch_submitters():
     )
     if failures:
         report_msg += f"\nFailed: {', '.join(failures)}"
-    _send_via_edge(REPORT_CHANNEL_ID, report_msg)
+    _send_message(REPORT_CHANNEL_ID, report_msg, bot="automation")
 
 
 def _run_poll_submissions(report_channel: str | None):
@@ -563,7 +613,7 @@ def _run_poll_submissions(report_channel: str | None):
     discover_data = _call_edge("submissions-discover")
     if not discover_data:
         print("[submissions] Discover failed, aborting")
-        _send_via_edge(report_ch, "❌ **Submissions poll failed** — discover error")
+        _send_message(report_ch, "❌ **Submissions poll failed** — discover error", bot="automation")
         return
 
     all_threads = discover_data.get("threads", [])
@@ -737,7 +787,7 @@ def _run_poll_submissions(report_channel: str | None):
 
     report_msg = "\n".join(report_lines)
     print(f"[submissions] Done in {elapsed}s")
-    _send_via_edge(report_ch, report_msg)
+    _send_message(report_ch, report_msg, bot="automation")
 
 
 # ── Endpoint ──
