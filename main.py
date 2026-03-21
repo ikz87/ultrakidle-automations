@@ -41,6 +41,8 @@ DISCORD_HEADERS = {
     "User-Agent": "DiscordBot (https://ultrakidle.online, 1.0)",
 }
 SUPABASE_FUNCTIONS_URL = f"{SUPABASE_URL}/functions/v1"
+SUBMISSIONS_BATCH_SIZE = 10
+SUBMISSIONS_REPORT_CHANNEL_ID = "1481872631144775680"
 
 
 _SCALE = 2
@@ -76,6 +78,36 @@ def safe_json(res: requests.Response):
 
 # ── Avatar helpers ──
 
+
+def _call_edge(fn_name: str, payload: dict | None = None) -> dict | None:
+    while True:
+        try:
+            res = requests.post(
+                f"{SUPABASE_FUNCTIONS_URL}/{fn_name}",
+                headers={
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload or {},
+                timeout=120,
+            )
+            data = safe_json(res)
+            if res.ok and data:
+                return data
+            if res.status_code in (401, 500):
+                print(
+                    f"[edge] {fn_name} returned {res.status_code}, "
+                    f"aborting: {res.text[:200]}"
+                )
+                return None
+            print(
+                f"[edge] {fn_name} returned {res.status_code}, "
+                "retrying in 3s"
+            )
+            time.sleep(3)
+        except Exception as e:
+            print(f"[edge] {fn_name} request error: {e}, retrying in 5s")
+            time.sleep(5)
 
 def _fetch_avatar(url: str, retries: int = 3) -> PILImage.Image | None:
     for attempt in range(retries):
@@ -514,6 +546,200 @@ def _run_refetch_submitters():
     _send_via_edge(REPORT_CHANNEL_ID, report_msg)
 
 
+def _run_poll_submissions(report_channel: str | None):
+    started = time.time()
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    report_ch = report_channel or SUBMISSIONS_REPORT_CHANNEL_ID
+
+    total_ingested = 0
+    total_rejected_ingest = 0
+    total_approved = 0
+    total_rejected_resolve = 0
+    total_expired = 0
+    total_skipped = 0
+
+    # ── Phase 1: Discover ──
+    print("[submissions] Phase 1: Discovering threads")
+    discover_data = _call_edge("submissions-discover")
+    if not discover_data:
+        print("[submissions] Discover failed, aborting")
+        _send_via_edge(report_ch, "❌ **Submissions poll failed** — discover error")
+        return
+
+    all_threads = discover_data.get("threads", [])
+    print(f"[submissions] Discovered {len(all_threads)} new thread(s)")
+
+    # ── Phase 2: Ingest in batches ──
+    if all_threads:
+        print("[submissions] Phase 2: Ingesting")
+        for i in range(0, len(all_threads), SUBMISSIONS_BATCH_SIZE):
+            batch = all_threads[i : i + SUBMISSIONS_BATCH_SIZE]
+            batch_num = i // SUBMISSIONS_BATCH_SIZE + 1
+            print(
+                f"[submissions] Ingest batch {batch_num} "
+                f"({len(batch)} threads)"
+            )
+
+            result = _call_edge(
+                "submissions-ingest", {"threads": batch}
+            )
+            if result:
+                total_ingested += result.get("ingested", 0)
+                total_rejected_ingest += result.get("rejected", 0)
+            else:
+                print(
+                    f"[submissions] Ingest batch {batch_num} failed"
+                )
+    else:
+        print("[submissions] Nothing to ingest")
+
+    # ── Phase 3: Resolve in batches ──
+    print("[submissions] Phase 3: Resolving pending submissions")
+    pending = (
+        sb.from_("image_submissions")
+        .select("*")
+        .eq("status", "pending")
+        .order("created_at", desc=False)
+        .execute()
+        .data
+        or []
+    )
+    print(f"[submissions] {len(pending)} pending submission(s)")
+
+    if pending:
+        for i in range(0, len(pending), SUBMISSIONS_BATCH_SIZE):
+            batch = pending[i : i + SUBMISSIONS_BATCH_SIZE]
+            batch_num = i // SUBMISSIONS_BATCH_SIZE + 1
+            print(
+                f"[submissions] Resolve batch {batch_num} "
+                f"({len(batch)} submissions)"
+            )
+
+            result = _call_edge(
+                "submissions-resolve", {"submissions": batch}
+            )
+            if result:
+                total_approved += result.get("approved", 0)
+                total_rejected_resolve += result.get("rejected", 0)
+                total_expired += result.get("expired", 0)
+                total_skipped += result.get("skipped", 0)
+            else:
+                print(
+                    f"[submissions] Resolve batch {batch_num} failed"
+                )
+    else:
+        print("[submissions] Nothing to resolve")
+
+    # ── Phase 4: Build summary report ──
+    print("[submissions] Phase 4: Building report")
+
+    approved_subs = (
+        sb.from_("image_submissions")
+        .select("id, level_id, discord_user_id")
+        .eq("status", "approved")
+        .execute()
+        .data
+        or []
+    )
+
+    levels = (
+        sb.from_("levels")
+        .select("id, level_number, level_name")
+        .execute()
+        .data
+        or []
+    )
+
+    report_lines = [
+        "📊 **Submissions Poll Report**",
+        "",
+        f"**Discovered:** {len(all_threads)}",
+        f"**Ingested:** {total_ingested} | "
+        f"**Rejected (ingest):** {total_rejected_ingest}",
+        f"**Approved:** {total_approved} | "
+        f"**Rejected (vote):** {total_rejected_resolve} | "
+        f"**Expired:** {total_expired} | "
+        f"**Skipped:** {total_skipped}",
+    ]
+
+    if approved_subs and levels:
+        level_counts: dict[str, int] = {}
+        user_counts: dict[str, int] = {}
+        for s in approved_subs:
+            level_counts[s["level_id"]] = (
+                level_counts.get(s["level_id"], 0) + 1
+            )
+            user_counts[s["discord_user_id"]] = (
+                user_counts.get(s["discord_user_id"], 0) + 1
+            )
+
+        level_stats = [
+            {
+                "number": l["level_number"],
+                "name": l["level_name"],
+                "count": level_counts.get(l["id"], 0),
+            }
+            for l in levels
+        ]
+
+        least_10 = sorted(level_stats, key=lambda x: x["count"])[:10]
+        most_10 = sorted(
+            level_stats, key=lambda x: x["count"], reverse=True
+        )[:10]
+
+        top_users = sorted(
+            user_counts.items(), key=lambda x: x[1], reverse=True
+        )[:5]
+
+        # Resolve user display names from submitter_profiles
+        user_ids = [uid for uid, _ in top_users]
+        profiles = (
+            sb.from_("submitter_profiles")
+            .select("discord_user_id, discord_name")
+            .in_("discord_user_id", user_ids)
+            .execute()
+            .data
+            or []
+        )
+        name_map = {
+            p["discord_user_id"]: p["discord_name"] for p in profiles
+        }
+
+        def fmt_levels(lst):
+            return "\n".join(
+                f"{i+1}. **{l['number']}** — {l['name']} ({l['count']})"
+                for i, l in enumerate(lst)
+            )
+
+        def fmt_users(lst):
+            return "\n".join(
+                f"{i+1}. **{name_map.get(uid, uid)}** — "
+                f"{count} approved submission{'s' if count != 1 else ''}"
+                for i, (uid, count) in enumerate(lst)
+            )
+
+        report_lines += [
+            "",
+            f"**Total approved (all time):** {len(approved_subs)}",
+            "",
+            "📉 **Levels with fewest submissions:**",
+            fmt_levels(least_10),
+            "",
+            "📈 **Levels with most submissions:**",
+            fmt_levels(most_10),
+            "",
+            "🏆 **Top contributors:**",
+            fmt_users(top_users),
+        ]
+
+    elapsed = round(time.time() - started, 1)
+    report_lines.insert(1, f"Duration: {elapsed}s")
+
+    report_msg = "\n".join(report_lines)
+    print(f"[submissions] Done in {elapsed}s")
+    _send_via_edge(report_ch, report_msg)
+
+
 # ── Endpoint ──
 
 @app.post("/cron/refetch-submitters-data")
@@ -547,6 +773,21 @@ def daily_notifications(
     background_tasks.add_task(
         _run_daily_notifications, filter_channel, test_channel
     )
+    return {"ok": True, "status": "started"}
+
+@app.post("/cron/poll-submissions")
+def poll_submissions(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    report_channel: str | None = Query(
+        None, description="Override report channel ID"
+    ),
+):
+    auth = request.headers.get("Authorization")
+    if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, 401)
+
+    background_tasks.add_task(_run_poll_submissions, report_channel)
     return {"ok": True, "status": "started"}
 
 
