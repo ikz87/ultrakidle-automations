@@ -358,28 +358,33 @@ def _run_daily_notifications(
 
     print(f"[daily] Rendered {len(guild_payloads)} images, sending...")
 
-    # Send sequentially
+    # Send with concurrency
     succeeded = 0
     failed = 0
     skipped = len(guild_channels) - len(summaries)
     failures: list[str] = []
 
+    send_tasks: list[tuple[str, str, str]] = []  # (ch_id, msg, png_b64)
     for gid, ch_ids in guild_channels.items():
         if gid not in guild_payloads:
             continue
-
         msg, png_b64 = guild_payloads[gid]
-        targets = (
-            [test_channel] if test_channel else ch_ids
-        )
-
+        targets = [test_channel] if test_channel else ch_ids
         for ch_id in targets:
-            ok = _send_via_edge(ch_id, msg, png_b64)
-            if ok:
+            send_tasks.append((ch_id, msg, png_b64))
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {
+            pool.submit(_send_via_edge, ch, msg, png): ch
+            for ch, msg, png in send_tasks
+        }
+        for f in futures:
+            ch = futures[f]
+            if f.result():
                 succeeded += 1
             else:
                 failed += 1
-                failures.append(ch_id)
+                failures.append(ch)
 
     elapsed = round(time.time() - started, 1)
     report = (
