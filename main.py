@@ -33,7 +33,7 @@ ASPECT_TOLERANCE = 0.02
 LEVEL_PATTERN = re.compile(
     r"^(\d+-\d+|\d+-[A-Z]\d*|P-\d+)$", re.IGNORECASE
 )
-REPORT_CHANNEL_ID = "1478290652172259462"
+REPORT_CHANNEL_ID = "1484843417736314932"
 
 DISCORD_HEADERS = {
     "Authorization": f"Bot {BOT_TOKEN}",
@@ -405,8 +405,128 @@ def _run_daily_notifications(
         report_msg += f"\nFailed: {', '.join(failures)}"
     _send_via_edge(REPORT_CHANNEL_ID, report_msg)
 
+def _run_refetch_submitters():
+    started = time.time()
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+    profiles = (
+        sb.from_("submitter_profiles")
+        .select("discord_user_id")
+        .execute()
+        .data
+        or []
+    )
+
+    if not profiles:
+        print("[refetch] No profiles found")
+        return
+
+    print(f"[refetch] {len(profiles)} profiles to sync")
+
+    updated = 0
+    failed = 0
+    failures: list[str] = []
+
+    for i, row in enumerate(profiles):
+        uid = row["discord_user_id"]
+
+        while True:
+            try:
+                res = requests.get(
+                    f"{DISCORD_API}/users/{uid}",
+                    headers=DISCORD_HEADERS,
+                    timeout=10,
+                )
+            except Exception as e:
+                print(f"[refetch] [{i+1}/{len(profiles)}] {uid} request error: {e}")
+                failed += 1
+                failures.append(uid)
+                break
+
+            if res.status_code == 429:
+                retry_after = float(
+                    res.headers.get("retry-after", "1")
+                )
+                print(
+                    f"[refetch] Rate limited on {uid}, "
+                    f"retrying after {retry_after}s"
+                )
+                time.sleep(retry_after)
+                continue
+
+            if not res.ok:
+                print(
+                    f"[refetch] [{i+1}/{len(profiles)}] {uid} "
+                    f"Discord error {res.status_code}"
+                )
+                failed += 1
+                failures.append(uid)
+                break
+
+            user = res.json()
+            display_name = user.get("global_name") or user.get(
+                "username"
+            )
+            avatar_hash = user.get("avatar")
+            if avatar_hash:
+                ext = "gif" if avatar_hash.startswith("a_") else "png"
+                avatar_url = (
+                    f"https://cdn.discordapp.com/avatars/"
+                    f"{uid}/{avatar_hash}.{ext}?size=256"
+                )
+            else:
+                avatar_url = None
+
+            try:
+                sb.from_("submitter_profiles").upsert(
+                    {
+                        "discord_user_id": uid,
+                        "discord_name": display_name,
+                        "discord_avatar_url": avatar_url,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    on_conflict="discord_user_id",
+                ).execute()
+                updated += 1
+            except Exception as e:
+                print(f"[refetch] Upsert error for {uid}: {e}")
+                failed += 1
+                failures.append(uid)
+
+            break
+
+        time.sleep(1)
+
+    elapsed = round(time.time() - started, 1)
+    print(
+        f"[refetch] Done in {elapsed}s — "
+        f"{updated} updated, {failed} failed"
+    )
+
+    report_msg = (
+        f"📊 **Submitter profile sync report**\n"
+        f"Processed: {len(profiles)} | Updated: {updated} | "
+        f"Failed: {failed}\n"
+        f"Duration: {elapsed}s"
+    )
+    if failures:
+        report_msg += f"\nFailed: {', '.join(failures)}"
+    _send_via_edge(REPORT_CHANNEL_ID, report_msg)
+
 
 # ── Endpoint ──
+
+@app.post("/cron/refetch-submitters-data")
+def refetch_submitters_data(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    auth = request.headers.get("Authorization")
+    if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, 401)
+
+    background_tasks.add_task(_run_refetch_submitters)
+    return {"ok": True, "status": "started"}
 
 
 @app.post("/cron/daily-notifications")
