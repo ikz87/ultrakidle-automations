@@ -523,7 +523,7 @@ def _render_daily_image(
     total_w = max(p.width for p in panels)
     total_h = sum(p.height for p in panels) + gap * (len(panels) - 1)
 
-    img = PILImage.new("RGB", (total_w, total_h), (0, 0, 0))
+    img = PILImage.new("RGBA", (total_w, total_h), (0, 0, 0, 0))
     y = 0
     for p in panels:
         img.paste(p, (0, y))
