@@ -225,7 +225,7 @@ def _fetch_all_avatars(
     urls: set[str],
 ) -> dict[str, PILImage.Image | None]:
     results: dict[str, PILImage.Image | None] = {}
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(_fetch_avatar, u): u for u in urls if u}
         for f in futures:
             results[futures[f]] = f.result()
