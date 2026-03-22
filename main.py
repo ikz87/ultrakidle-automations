@@ -204,7 +204,10 @@ def _call_edge(fn_name: str, payload: dict | None = None) -> dict | None:
             print(f"[edge] {fn_name} request error: {e}, retrying in 5s")
             time.sleep(5)
 
+
 def _fetch_avatar(url: str, retries: int = 3) -> PILImage.Image | None:
+    sep = "&" if "?" in url else "?"
+    url = f"{url}{sep}size=64"
     for attempt in range(retries):
         try:
             res = requests.get(url, timeout=10)
@@ -230,7 +233,10 @@ def _fetch_all_avatars(
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(_fetch_avatar, u): u for u in urls if u}
         for f in futures:
-            results[futures[f]] = f.result()
+            img = f.result()
+            if img:
+                img = _circular_avatar(img, _AVATAR_D)
+            results[futures[f]] = img
     return results
 
 
@@ -289,8 +295,7 @@ def _render_classic_canvas(
         avatar_img = avatars.get(avatar_url) if avatar_url else None
 
         if avatar_img:
-            circ = _circular_avatar(avatar_img, _AVATAR_D)
-            img.paste(circ, (ax, ay), circ)
+            img.paste(avatar_img, (ax, ay), avatar_img)
         else:
             draw.ellipse(
                 [ax, ay, ax + _AVATAR_D, ay + _AVATAR_D],
@@ -411,8 +416,7 @@ def _render_inferno_canvas(
         avatar_img = avatars.get(avatar_url) if avatar_url else None
 
         if avatar_img:
-            circ = _circular_avatar(avatar_img, _AVATAR_D)
-            img.paste(circ, (ax, ay), circ)
+            img.paste(avatar_img, (ax, ay), avatar_img)
         else:
             draw.ellipse(
                 [ax, ay, ax + _AVATAR_D, ay + _AVATAR_D],
@@ -519,14 +523,17 @@ def _render_daily_image(
     total_w = max(p.width for p in panels)
     total_h = sum(p.height for p in panels) + gap * (len(panels) - 1)
 
-    img = PILImage.new("RGBA", (total_w, total_h), (0, 0, 0, 0))
+    img = PILImage.new("RGB", (total_w, total_h), (0, 0, 0))
     y = 0
     for p in panels:
         img.paste(p, (0, y))
         y += p.height + gap
+        p.close()
+    panels.clear()
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
+    img.close()
     return buf.getvalue()
 
 # ── Message formatting ──
