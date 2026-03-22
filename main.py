@@ -207,9 +207,13 @@ def _fetch_avatar(url: str, retries: int = 3) -> PILImage.Image | None:
         try:
             res = requests.get(url, timeout=10)
             if res.ok:
-                return PILImage.open(io.BytesIO(res.content)).convert(
+                img = PILImage.open(io.BytesIO(res.content)).convert(
                     "RGBA"
                 )
+                img = img.resize(
+                    (_AVATAR_D, _AVATAR_D), PILImage.LANCZOS
+                )
+                return img
         except Exception:
             pass
         if attempt < retries - 1:
