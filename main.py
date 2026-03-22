@@ -123,7 +123,7 @@ def _send_message(
             time.sleep(5)
 
 
-_SCALE = 2
+_SCALE = 1
 _CELL = 16 * _SCALE
 _CELL_GAP = 3 * _SCALE
 _GRID_COLS = 6
@@ -246,10 +246,10 @@ def _circular_avatar(img: PILImage.Image, d: int) -> PILImage.Image:
 # ── Image rendering ──
 
 
-def _render_image(
+def _render_classic_canvas(
     results: list[dict],
     avatars: dict[str, PILImage.Image | None],
-) -> bytes:
+) -> PILImage.Image:
     n = len(results)
     best_cols = 1
     best_diff = float("inf")
@@ -257,7 +257,7 @@ def _render_image(
         rows = math.ceil(n / c)
         w = 2 * _IMG_PAD + c * _CARD_W + (c - 1) * _CARD_GAP
         h = 2 * _IMG_PAD + rows * _CARD_H + (rows - 1) * _CARD_GAP
-        diff = abs(w / h - 16 / 9)
+        diff = abs(w / h - 32 / 9)
         if diff < best_diff:
             best_diff = diff
             best_cols = c
@@ -318,15 +318,13 @@ def _render_image(
                         fill = _COLOR_MAP[hint]
                 draw.rectangle([x, y, x + _CELL, y + _CELL], fill=fill)
 
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
+    return img
 
-def _render_inferno_image(
+def _render_inferno_canvas(
     results: list[dict],
     avatars: dict[str, PILImage.Image | None],
     set_number: int | str,
-) -> bytes:
+) -> PILImage.Image:
     fl = _font(_INF_SUB_FS)
     ft = _font(16 * _SCALE)
     fsc = _font(_INF_SCORE_FS)
@@ -377,7 +375,7 @@ def _render_inferno_image(
         rows = math.ceil(n / c)
         w = 2 * _IMG_PAD + c * card_w + (c - 1) * _CARD_GAP
         h = 2 * _IMG_PAD + rows * card_h + (rows - 1) * _CARD_GAP
-        diff = abs(w / h - 16 / 9)
+        diff = abs(w / h - 32 / 9)
         if diff < best_diff:
             best_diff = diff
             best_cols = c
@@ -494,10 +492,42 @@ def _render_inferno_image(
             fill="#CCCCCC",
         )
 
+    return img
+
+def _render_daily_image(
+    classic_results: list[dict] | None,
+    inferno_data: dict | None,
+    avatars: dict[str, PILImage.Image | None],
+) -> bytes:
+    panels: list[PILImage.Image] = []
+
+    if classic_results:
+        panels.append(_render_classic_canvas(classic_results, avatars))
+    if inferno_data:
+        panels.append(
+            _render_inferno_canvas(
+                inferno_data["results"],
+                avatars,
+                inferno_data.get("set_number", "?"),
+            )
+        )
+
+    if not panels:
+        return b""
+
+    gap = _CARD_GAP
+    total_w = max(p.width for p in panels)
+    total_h = sum(p.height for p in panels) + gap * (len(panels) - 1)
+
+    img = PILImage.new("RGBA", (total_w, total_h), (0, 0, 0, 0))
+    y = 0
+    for p in panels:
+        img.paste(p, (0, y))
+        y += p.height + gap
+
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
-
 
 # ── Message formatting ──
 
@@ -722,45 +752,35 @@ def _run_daily_notifications(
 
         for gid in active:
             parts: list[str] = [_format_header()]
-            attachments: list[dict] = []
 
             if gid in classic_summaries:
                 parts.append(
-                    _format_classic_section(
-                        classic_summaries[gid]
-                    )
+                    _format_classic_section(classic_summaries[gid])
                 )
-                png = _render_image(
-                    classic_summaries[gid]["results"], avatars
-                )
-                attachments.append(
-                    {
-                        "base64": base64.b64encode(png).decode(),
-                        "filename": "classic.png",
-                        "content_type": "image/png",
-                    }
-                )
-                del png
-
             if gid in inferno_summaries:
-                inf = inferno_summaries[gid]
-                parts.append(_format_inferno_section(inf))
-                png = _render_inferno_image(
-                    inf["results"],
-                    avatars,
-                    inf.get("set_number", "?"),
+                parts.append(
+                    _format_inferno_section(inferno_summaries[gid])
                 )
-                attachments.append(
-                    {
-                        "base64": base64.b64encode(png).decode(),
-                        "filename": "inferno.png",
-                        "content_type": "image/png",
-                    }
-                )
-                del png
 
             parts.append("New dailies are waiting!")
             msg = "\n\n".join(parts)
+
+            png = _render_daily_image(
+                classic_summaries.get(gid, {}).get("results"),
+                inferno_summaries.get(gid),
+                avatars,
+            )
+
+            attachments: list[dict] = []
+            if png:
+                attachments.append(
+                    {
+                        "base64": base64.b64encode(png).decode(),
+                        "filename": "results.png",
+                        "content_type": "image/png",
+                    }
+                )
+                del png
 
             targets = (
                 [test_channel]
