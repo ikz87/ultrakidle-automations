@@ -617,7 +617,6 @@ def _rpc_guild_inferno_summary(guild_id: str) -> dict | None:
 
 # ── Orchestrator ──
 
-
 def _run_daily_notifications(
     filter_channel: str | None, test_channel: str | None
 ):
@@ -703,9 +702,16 @@ def _run_daily_notifications(
     print(f"[daily] Fetching {len(avatar_urls)} unique avatars")
     avatars = _fetch_all_avatars(avatar_urls)
 
-    guild_payloads: dict[str, tuple[str, list[dict]]] = {}
+    print(
+        f"[daily] Sending to {len(active_guilds)} guilds..."
+    )
+
+    succeeded = 0
+    failed = 0
+    failures: list[str] = []
+
     for gid in active_guilds:
-        parts: list[str] = []
+        parts: list[str] = [_format_header()]
         attachments: list[dict] = []
 
         if gid in classic_summaries:
@@ -722,6 +728,7 @@ def _run_daily_notifications(
                     "content_type": "image/png",
                 }
             )
+            del png
 
         if gid in inferno_summaries:
             inf = inferno_summaries[gid]
@@ -738,47 +745,28 @@ def _run_daily_notifications(
                     "content_type": "image/png",
                 }
             )
+            del png
 
-        parts.insert(0, _format_header())
         parts.append("New dailies are waiting!")
         msg = "\n\n".join(parts)
-        guild_payloads[gid] = (msg, attachments)
 
-    print(
-        f"[daily] Rendered {len(guild_payloads)} payloads, sending..."
-    )
-
-    succeeded = 0
-    failed = 0
-    failures: list[str] = []
-
-    send_tasks: list[tuple[str, str, list[dict]]] = []
-    for gid, ch_ids in guild_channels.items():
-        if gid not in guild_payloads:
-            continue
-        msg, atts = guild_payloads[gid]
-        targets = [test_channel] if test_channel else ch_ids
+        targets = [test_channel] if test_channel else guild_channels.get(gid, [])
         for ch_id in targets:
-            send_tasks.append((ch_id, msg, atts))
-
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {
-            pool.submit(
-                _send_message,
-                ch,
+            ok = _send_message(
+                ch_id,
                 msg,
                 components=DAILY_COMPONENTS,
-                attachments=atts,
-            ): ch
-            for ch, msg, atts in send_tasks
-        }
-        for f in futures:
-            ch = futures[f]
-            if f.result():
+                attachments=attachments,
+            )
+            if ok:
                 succeeded += 1
             else:
                 failed += 1
-                failures.append(ch)
+                failures.append(ch_id)
+
+        del attachments
+
+    avatars.clear()
 
     elapsed = round(time.time() - started, 1)
     report = (
@@ -799,6 +787,7 @@ def _run_daily_notifications(
     if failures:
         report_msg += f"\nFailed: {', '.join(failures)}"
     _send_message(REPORT_CHANNEL_ID, report_msg, bot="automation")
+
 
 def _run_refetch_submitters():
     started = time.time()
@@ -868,7 +857,7 @@ def _run_refetch_submitters():
                 ext = "gif" if avatar_hash.startswith("a_") else "png"
                 avatar_url = (
                     f"https://cdn.discordapp.com/avatars/"
-                    f"{uid}/{avatar_hash}.{ext}?size=256"
+                    f"{uid}/{avatar_hash}.{ext}?size=128"
                 )
             else:
                 avatar_url = None
