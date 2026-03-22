@@ -503,6 +503,15 @@ def _format_header() -> str:
 
 
 def _format_classic_section(data: dict) -> str:
+    rank_emojis = {
+        "1/5": "<:prank:1485131026328977418>",
+        "2/5": "<:srank:1485131053654872134>",
+        "3/5": "<:arank:1485130880623312896>",
+        "4/5": "<:brank:1485130946314502225>",
+        "5/5": "<:crank:1485130972075655289>",
+        "X/5": "<:drank:1485130996323057734>",
+    }
+
     grouped: dict[str, list[str]] = {}
     for r in data["results"]:
         key = f"{r['attempts']}/5" if r["is_win"] else "X/5"
@@ -517,7 +526,8 @@ def _format_classic_section(data: dict) -> str:
     lines = []
     for key, names in sorted_groups:
         prefix = "👑 " if key == best_key and key != "X/5" else ""
-        lines.append(f"{prefix}{key}: {'  '.join(names)}")
+        emoji = rank_emojis.get(key, "")
+        lines.append(f"{emoji} {key}: {' | '.join(names)}")
 
     streak = data.get("streak", 0)
     if streak == 1:
@@ -529,7 +539,7 @@ def _format_classic_section(data: dict) -> str:
 
     day = data.get("day_number", "?")
     return (
-        f"🎯 **Classic #{day}**{streak_line}\n" + "\n".join(lines)
+        f"**Classic #{day}**{streak_line}\n" + "\n".join(lines)
     )
 
 
@@ -541,19 +551,19 @@ def _format_inferno_section(data: dict) -> str:
     set_number = data.get("set_number", "?")
 
     tier_order = [
-        ("P-rank", 500),
-        ("S-rank", 400),
-        ("A-rank", 300),
-        ("B-rank", 200),
-        ("C-rank", 100),
-        ("D-rank", 0),
+        ("P-rank", 500, "<:prank:1485131026328977418>"),
+        ("S-rank", 400, "<:srank:1485131053654872134>"),
+        ("A-rank", 300, "<:arank:1485130880623312896>"),
+        ("B-rank", 200, "<:brank:1485130946314502225>"),
+        ("C-rank", 100, "<:crank:1485130972075655289>"),
+        ("D-rank", 0, "<:drank:1485130996323057734>"),
     ]
 
     grouped: dict[str, list[str]] = {}
     for r in results:
         score = r.get("total_score", 0)
         tier = "D-rank"
-        for name, threshold in tier_order:
+        for name, threshold, _ in tier_order:
             if score >= threshold:
                 tier = name
                 break
@@ -561,16 +571,16 @@ def _format_inferno_section(data: dict) -> str:
 
     best_tier = None
     lines = []
-    for tier, _ in tier_order:
+    for tier, _, emoji in tier_order:
         if tier in grouped:
             if best_tier is None:
                 best_tier = tier
             prefix = "👑 " if tier == best_tier else ""
-            names = "  ".join(grouped[tier])
-            lines.append(f"{prefix}{tier}: {names}")
+            names = " | ".join(grouped[tier])
+            lines.append(f"{emoji} {names}")
 
     return (
-        f"🎯 **Infernoguessr #{set_number}**\n" + "\n".join(lines)
+        f"**Infernoguessr #{set_number}**\n" + "\n".join(lines)
     )
 
 # ── Supabase + Edge function calls ──
