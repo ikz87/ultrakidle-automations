@@ -571,13 +571,14 @@ def _format_inferno_section(data: dict) -> str:
 
     best_tier = None
     lines = []
-    for tier, _, emoji in tier_order:
+    for tier, threshold, emoji in tier_order:
         if tier in grouped:
             if best_tier is None:
                 best_tier = tier
             prefix = "👑 " if tier == best_tier else ""
             names = " | ".join(grouped[tier])
-            lines.append(f"{emoji} {names}")
+            label = str(threshold) if threshold == 500 else f"{threshold}+"
+            lines.append(f"{emoji} {label}: {names}")
 
     return (
         f"**Infernoguessr #{set_number}**\n" + "\n".join(lines)
