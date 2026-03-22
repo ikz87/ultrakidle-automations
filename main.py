@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from PIL import ImageDraw, ImageFont
 from PIL import Image as PILImage
 from supabase import create_client
 from dotenv import load_dotenv
@@ -137,9 +138,25 @@ _DEFAULT_CELL = "#3a3a3c"
 _CARD_BG = "#0D0D0D"
 _BORDER = "#ffffff"
 _AVATAR_FB = "#444444"
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+FONT_FILE = os.path.join(FONT_DIR, "font.ttf")
+
+_INF_SQUARE_SIZE = 12 * _SCALE
+_INF_ROW_GAP = 3 * _SCALE
+_INF_LINE_GAP = 2 * _SCALE
+_INF_SECTION_GAP = 8 * _SCALE
+_INF_ROUNDS = 5
+
+_INF_NAME_FS = 16 * _SCALE
+_INF_SUB_FS = 11 * _SCALE
+_INF_STAT_FS = 12 * _SCALE
+_INF_SCORE_FS = 12 * _SCALE
 
 app = FastAPI()
 
+
+def _font(size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(FONT_FILE, size)
 
 def safe_json(res: requests.Response):
     try:
@@ -297,11 +314,195 @@ def _render_image(
     img.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
 
+def _render_inferno_image(
+    results: list[dict],
+    avatars: dict[str, PILImage.Image | None],
+    set_number: int | str,
+) -> bytes:
+    fl = _font(_INF_SUB_FS)
+    ft = _font(16 * _SCALE)
+    fsc = _font(_INF_SCORE_FS)
+
+    dummy = PILImage.new("RGBA", (1, 1))
+    dd = ImageDraw.Draw(dummy)
+
+    label_h = dd.textbbox((0, 0), "Ag", font=fl)[3]
+    stat_h = dd.textbbox((0, 0), "Ag", font=ft)[3]
+    score_h = dd.textbbox((0, 0), "+100", font=fsc)[3]
+    row_h = max(_INF_SQUARE_SIZE, score_h)
+
+    squares_col_h = (
+        _INF_ROUNDS * row_h + (_INF_ROUNDS - 1) * _INF_ROW_GAP
+    )
+
+    stats_content_h = (
+        label_h
+        + _INF_LINE_GAP
+        + stat_h
+        + _INF_SECTION_GAP
+        + label_h
+        + _INF_LINE_GAP
+        + stat_h
+    )
+    text_content_h = max(squares_col_h, stats_content_h)
+    card_h = max(text_content_h, _AVATAR_D) + 2 * _CARD_PAD
+
+    score_label_w = dd.textbbox((0, 0), "+100", font=fsc)[2]
+    squares_col_w = (
+        _INF_SQUARE_SIZE + _INF_ROW_GAP * 2 + score_label_w
+    )
+
+    stat_gap = 12 * _SCALE
+    pts_label_w = dd.textbbox((0, 0), "PTS", font=fl)[2]
+    pts_val_w = dd.textbbox((0, 0), "500/500", font=ft)[2]
+    time_label_w = dd.textbbox((0, 0), "TIME", font=fl)[2]
+    time_val_w = dd.textbbox((0, 0), "0:00.0", font=ft)[2]
+    stats_w = max(pts_label_w, pts_val_w, time_label_w, time_val_w)
+
+    text_w = squares_col_w + stat_gap + stats_w
+    card_w = 3 * _CARD_PAD + _AVATAR_D + text_w
+
+    n = len(results)
+    best_cols = 1
+    best_diff = float("inf")
+    for c in range(1, n + 1):
+        rows = math.ceil(n / c)
+        w = 2 * _IMG_PAD + c * card_w + (c - 1) * _CARD_GAP
+        h = 2 * _IMG_PAD + rows * card_h + (rows - 1) * _CARD_GAP
+        diff = abs(w / h - 16 / 9)
+        if diff < best_diff:
+            best_diff = diff
+            best_cols = c
+
+    cols = best_cols
+    total_rows = math.ceil(n / cols)
+    tw = 2 * _IMG_PAD + cols * card_w + (cols - 1) * _CARD_GAP
+    th = (
+        2 * _IMG_PAD
+        + total_rows * card_h
+        + (total_rows - 1) * _CARD_GAP
+    )
+
+    img = PILImage.new("RGBA", (tw, th), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    for i, r in enumerate(results):
+        col = i % cols
+        row = i // cols
+        cx = _IMG_PAD + col * (card_w + _CARD_GAP)
+        cy = _IMG_PAD + row * (card_h + _CARD_GAP)
+
+        draw.rectangle(
+            [cx, cy, cx + card_w, cy + card_h],
+            fill=_CARD_BG,
+            outline=_BORDER,
+            width=_SCALE,
+        )
+
+        ax = cx + _CARD_PAD
+        ay = cy + (card_h - _AVATAR_D) // 2
+        avatar_url = r.get("avatar_url", "")
+        avatar_img = avatars.get(avatar_url) if avatar_url else None
+
+        if avatar_img:
+            circ = _circular_avatar(avatar_img, _AVATAR_D)
+            img.paste(circ, (ax, ay), circ)
+        else:
+            draw.ellipse(
+                [ax, ay, ax + _AVATAR_D, ay + _AVATAR_D],
+                fill=_AVATAR_FB,
+            )
+        draw.ellipse(
+            [ax, ay, ax + _AVATAR_D, ay + _AVATAR_D],
+            outline=_BORDER,
+            width=2 * _SCALE,
+        )
+
+        tx = cx + 2 * _CARD_PAD + _AVATAR_D
+        ty = cy + _CARD_PAD
+
+        # Squares column
+        scores = r.get("score_history") or []
+        for j in range(_INF_ROUNDS):
+            score = scores[j] if j < len(scores) else 0
+            if score >= 100:
+                color = _COLOR_MAP["GREEN"]
+            elif score >= 60:
+                color = _COLOR_MAP["YELLOW"]
+            else:
+                color = _COLOR_MAP["RED"]
+
+            ry = ty + j * (row_h + _INF_ROW_GAP)
+            sq_y = ry + (row_h - _INF_SQUARE_SIZE) // 2
+            draw.rectangle(
+                [
+                    tx,
+                    sq_y,
+                    tx + _INF_SQUARE_SIZE,
+                    sq_y + _INF_SQUARE_SIZE,
+                ],
+                fill=color,
+            )
+            score_x = tx + _INF_SQUARE_SIZE + _INF_ROW_GAP * 2
+            score_ty = ry + (row_h - score_h) // 2
+            draw.text(
+                (score_x, score_ty),
+                f"+{score}",
+                font=fsc,
+                fill="#FFFFFF",
+            )
+
+        # Stats column
+        stats_x = tx + squares_col_w + stat_gap
+
+        total_score = r.get("total_score", 0)
+        draw.text(
+            (stats_x, ty), "PTS", font=fl, fill="#888888"
+        )
+        draw.text(
+            (stats_x, ty + label_h + _INF_LINE_GAP),
+            f"{total_score}/500",
+            font=ft,
+            fill="#CCCCCC",
+        )
+
+        total_time = r.get("total_time_seconds", 0) or 0
+        minutes = int(total_time) // 60
+        seconds = total_time - minutes * 60
+        time_y = (
+            ty
+            + label_h
+            + _INF_LINE_GAP
+            + stat_h
+            + _INF_SECTION_GAP
+        )
+        draw.text(
+            (stats_x, time_y), "TIME", font=fl, fill="#888888"
+        )
+        draw.text(
+            (stats_x, time_y + label_h + _INF_LINE_GAP),
+            f"{minutes}:{seconds:04.1f}",
+            font=ft,
+            fill="#CCCCCC",
+        )
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
 
 # ── Message formatting ──
 
+def _format_header() -> str:
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    date_str = yesterday.strftime("%B %d, %Y")
+    return (
+        f"🔴 ULTRAKIDLE {date_str} has ended!\n"
+        f"Here are yesterday's results:"
+    )
 
-def _format_message(data: dict) -> str:
+
+def _format_classic_section(data: dict) -> str:
     grouped: dict[str, list[str]] = {}
     for r in data["results"]:
         key = f"{r['attempts']}/5" if r["is_win"] else "X/5"
@@ -320,20 +521,57 @@ def _format_message(data: dict) -> str:
 
     streak = data.get("streak", 0)
     if streak == 1:
-        streak_line = "The streak begins... 👀 "
+        streak_line = "\nThe streak begins... 👀"
     elif streak > 1:
-        streak_line = f"This server is on a {streak} day streak! 🔥"
+        streak_line = f"\nThis server is on a {streak} day streak! 🔥"
     else:
         streak_line = ""
 
     day = data.get("day_number", "?")
     return (
-        f"🔴 ULTRAKIDLE #{day} has ended!\n{streak_line}\n"
-        f"Here are yesterday's results:\n"
-        + "\n".join(lines)
-        + "\n\nA new enemy is waiting!"
+        f"🎯 **Classic #{day}**{streak_line}\n" + "\n".join(lines)
     )
 
+
+def _format_inferno_section(data: dict) -> str:
+    results = data.get("results", [])
+    if not results:
+        return ""
+
+    set_number = data.get("set_number", "?")
+
+    tier_order = [
+        ("P-rank", 500),
+        ("S-rank", 400),
+        ("A-rank", 300),
+        ("B-rank", 200),
+        ("C-rank", 100),
+        ("D-rank", 0),
+    ]
+
+    grouped: dict[str, list[str]] = {}
+    for r in results:
+        score = r.get("total_score", 0)
+        tier = "D-rank"
+        for name, threshold in tier_order:
+            if score >= threshold:
+                tier = name
+                break
+        grouped.setdefault(tier, []).append(r["name"])
+
+    best_tier = None
+    lines = []
+    for tier, _ in tier_order:
+        if tier in grouped:
+            if best_tier is None:
+                best_tier = tier
+            prefix = "👑 " if tier == best_tier else ""
+            names = "  ".join(grouped[tier])
+            lines.append(f"{prefix}{tier}: {names}")
+
+    return (
+        f"🎯 **Infernoguessr #{set_number}**\n" + "\n".join(lines)
+    )
 
 # ── Supabase + Edge function calls ──
 
@@ -350,6 +588,20 @@ def _rpc_guild_summary(guild_id: str) -> dict | None:
             print(f"[{guild_id}] RPC error: {e}, retrying in 2s")
             time.sleep(2)
 
+def _rpc_guild_inferno_summary(guild_id: str) -> dict | None:
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    while True:
+        try:
+            res = sb.rpc(
+                "get_guild_inferno_summary",
+                {"p_guild_id": guild_id},
+            ).execute()
+            return res.data
+        except Exception as e:
+            print(
+                f"[{guild_id}] Inferno RPC error: {e}, retrying in 2s"
+            )
+            time.sleep(2)
 
 
 # ── Orchestrator ──
@@ -372,7 +624,6 @@ def _run_daily_notifications(
         print("[daily] No channels found")
         return
 
-    # Deduplicate guilds
     guild_channels: dict[str, list[str]] = {}
     for row in channels:
         guild_channels.setdefault(row["guild_id"], []).append(
@@ -384,70 +635,120 @@ def _run_daily_notifications(
         f"{len(guild_channels)} guilds"
     )
 
-    # Fetch all guild summaries (concurrency-limited)
-    summaries: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {
+    classic_summaries: dict[str, dict] = {}
+    inferno_summaries: dict[str, dict] = {}
+
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        classic_futures = {
             pool.submit(_rpc_guild_summary, gid): gid
             for gid in guild_channels
         }
-        for f in futures:
-            gid = futures[f]
+        inferno_futures = {
+            pool.submit(_rpc_guild_inferno_summary, gid): gid
+            for gid in guild_channels
+        }
+
+        for f in classic_futures:
+            gid = classic_futures[f]
             data = f.result()
             if data and data.get("results"):
-                summaries[gid] = data
+                classic_summaries[gid] = data
+
+        for f in inferno_futures:
+            gid = inferno_futures[f]
+            data = f.result()
+            if (
+                data
+                and data.get("results")
+                and len(data["results"]) > 0
+            ):
+                inferno_summaries[gid] = data
+
+    active_guilds = set(classic_summaries.keys()) | set(
+        inferno_summaries.keys()
+    )
+    skipped = len(guild_channels) - len(active_guilds)
 
     print(
-        f"[daily] {len(summaries)} guilds with results "
-        f"(skipped {len(guild_channels) - len(summaries)})"
+        f"[daily] {len(classic_summaries)} guilds with classic, "
+        f"{len(inferno_summaries)} with inferno, "
+        f"{skipped} skipped"
     )
 
-    if not summaries:
+    if not active_guilds:
         print("[daily] Nothing to send")
         return
 
-    # Collect unique avatar URLs and fetch them all
     avatar_urls: set[str] = set()
-    for data in summaries.values():
+    for data in classic_summaries.values():
         for r in data["results"]:
-            url = r.get("avatar_url")
-            if url:
+            if url := r.get("avatar_url"):
+                avatar_urls.add(url)
+    for data in inferno_summaries.values():
+        for r in data["results"]:
+            if url := r.get("avatar_url"):
                 avatar_urls.add(url)
 
     print(f"[daily] Fetching {len(avatar_urls)} unique avatars")
     avatars = _fetch_all_avatars(avatar_urls)
 
-    # Render images and format messages per guild
-    guild_payloads: dict[str, tuple[str, str]] = {}  # gid -> (msg, png_b64)
-    for gid, data in summaries.items():
-        msg = _format_message(data)
-        png = _render_image(data["results"], avatars)
-        png_b64 = base64.b64encode(png).decode()
-        guild_payloads[gid] = (msg, png_b64)
+    guild_payloads: dict[str, tuple[str, list[dict]]] = {}
+    for gid in active_guilds:
+        parts: list[str] = []
+        attachments: list[dict] = []
 
-    print(f"[daily] Rendered {len(guild_payloads)} images, sending...")
+        if gid in classic_summaries:
+            parts.append(
+                _format_classic_section(classic_summaries[gid])
+            )
+            png = _render_image(
+                classic_summaries[gid]["results"], avatars
+            )
+            attachments.append(
+                {
+                    "base64": base64.b64encode(png).decode(),
+                    "filename": "classic.png",
+                    "content_type": "image/png",
+                }
+            )
 
-    # Send with concurrency
+        if gid in inferno_summaries:
+            inf = inferno_summaries[gid]
+            parts.append(_format_inferno_section(inf))
+            png = _render_inferno_image(
+                inf["results"],
+                avatars,
+                inf.get("set_number", "?"),
+            )
+            attachments.append(
+                {
+                    "base64": base64.b64encode(png).decode(),
+                    "filename": "inferno.png",
+                    "content_type": "image/png",
+                }
+            )
+
+        parts.insert(0, _format_header())
+        parts.append("New dailies are waiting!")
+        msg = "\n\n".join(parts)
+        guild_payloads[gid] = (msg, attachments)
+
+    print(
+        f"[daily] Rendered {len(guild_payloads)} payloads, sending..."
+    )
+
     succeeded = 0
     failed = 0
-    skipped = len(guild_channels) - len(summaries)
     failures: list[str] = []
 
     send_tasks: list[tuple[str, str, list[dict]]] = []
     for gid, ch_ids in guild_channels.items():
         if gid not in guild_payloads:
             continue
-        msg, png_b64 = guild_payloads[gid]
-        img_attachment = [
-            {
-                "base64": png_b64,
-                "filename": "results.png",
-                "content_type": "image/png",
-            }
-        ]
+        msg, atts = guild_payloads[gid]
         targets = [test_channel] if test_channel else ch_ids
         for ch_id in targets:
-            send_tasks.append((ch_id, msg, img_attachment))
+            send_tasks.append((ch_id, msg, atts))
 
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
@@ -477,10 +778,11 @@ def _run_daily_notifications(
     if failures:
         print(f"[daily] Failed channels: {', '.join(failures)}")
 
-    # Send report to report channel
     report_msg = (
         f"📊 **Daily notification report**\n"
         f"Sent: {succeeded} | Skipped: {skipped} | Failed: {failed}\n"
+        f"Classic: {len(classic_summaries)} guilds | "
+        f"Inferno: {len(inferno_summaries)} guilds\n"
         f"Duration: {elapsed}s"
     )
     if failures:
