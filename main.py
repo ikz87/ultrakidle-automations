@@ -2,6 +2,7 @@ import io
 import os
 import re
 import time
+from functools import lru_cache
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -155,6 +156,7 @@ _INF_SCORE_FS = 12 * _SCALE
 app = FastAPI()
 
 
+@lru_cache(maxsize=None)
 def _font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(FONT_FILE, size)
 
