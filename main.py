@@ -861,7 +861,10 @@ def _run_refetch_submitters():
     for i, row in enumerate(profiles):
         uid = row["discord_user_id"]
 
-        while True:
+        MAX_RETRIES = 3
+        MAX_RETRY_AFTER = 30.0
+
+        for attempt in range(MAX_RETRIES):
             try:
                 res = requests.get(
                     f"{DISCORD_API}/users/{uid}",
@@ -875,10 +878,16 @@ def _run_refetch_submitters():
                 break
 
             if res.status_code == 429:
-                retry_after = max(
-                    float(res.headers.get("retry-after", "1")),
-                    1.0,
-                )
+                retry_after = float(res.headers.get("retry-after", "1"))
+                if retry_after > MAX_RETRY_AFTER:
+                    print(
+                        f"[refetch] [{i+1}/{len(profiles)}] {uid} "
+                        f"rate limited for {retry_after}s, skipping"
+                    )
+                    failed += 1
+                    failures.append(uid)
+                    time.sleep(MAX_RETRY_AFTER)
+                    break
                 print(
                     f"[refetch] Rate limited on {uid}, "
                     f"retrying after {retry_after}s"
@@ -926,8 +935,12 @@ def _run_refetch_submitters():
                 failures.append(uid)
 
             break
+        else:
+            print(f"[refetch] [{i+1}/{len(profiles)}] {uid} max retries exceeded")
+            failed += 1
+            failures.append(uid)
 
-        time.sleep(1)
+        time.sleep(2)
 
     elapsed = round(time.time() - started, 1)
     print(
