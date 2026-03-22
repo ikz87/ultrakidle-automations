@@ -2,6 +2,8 @@ import io
 import os
 import re
 import time
+import gc
+
 from functools import lru_cache
 from datetime import datetime, timezone, timedelta
 
@@ -652,7 +654,7 @@ def _run_daily_notifications(
         f"{len(guild_ids)} guilds"
     )
 
-    GUILD_BATCH = 10
+    GUILD_BATCH = 5
     succeeded = 0
     failed = 0
     skipped = 0
@@ -779,9 +781,11 @@ def _run_daily_notifications(
                     failures.append(ch_id)
 
             del attachments
+            gc.collect()
 
         avatars.clear()
         del classic_summaries, inferno_summaries
+        gc.collect()
 
     elapsed = round(time.time() - started, 1)
     report = (
