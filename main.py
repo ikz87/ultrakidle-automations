@@ -646,133 +646,142 @@ def _run_daily_notifications(
             row["channel_id"]
         )
 
+    guild_ids = list(guild_channels.keys())
     print(
         f"[daily] {len(channels)} channels across "
-        f"{len(guild_channels)} guilds"
+        f"{len(guild_ids)} guilds"
     )
 
-    classic_summaries: dict[str, dict] = {}
-    inferno_summaries: dict[str, dict] = {}
-
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        classic_futures = {
-            pool.submit(_rpc_guild_summary, gid): gid
-            for gid in guild_channels
-        }
-        inferno_futures = {
-            pool.submit(_rpc_guild_inferno_summary, gid): gid
-            for gid in guild_channels
-        }
-
-        for f in classic_futures:
-            gid = classic_futures[f]
-            data = f.result()
-            if data and data.get("results"):
-                classic_summaries[gid] = data
-
-        for f in inferno_futures:
-            gid = inferno_futures[f]
-            data = f.result()
-            if (
-                data
-                and data.get("results")
-                and len(data["results"]) > 0
-            ):
-                inferno_summaries[gid] = data
-
-    active_guilds = set(classic_summaries.keys()) | set(
-        inferno_summaries.keys()
-    )
-    skipped = len(guild_channels) - len(active_guilds)
-
-    print(
-        f"[daily] {len(classic_summaries)} guilds with classic, "
-        f"{len(inferno_summaries)} with inferno, "
-        f"{skipped} skipped"
-    )
-
-    if not active_guilds:
-        print("[daily] Nothing to send")
-        return
-
-    avatar_urls: set[str] = set()
-    for data in classic_summaries.values():
-        for r in data["results"]:
-            if url := r.get("avatar_url"):
-                avatar_urls.add(url)
-    for data in inferno_summaries.values():
-        for r in data["results"]:
-            if url := r.get("avatar_url"):
-                avatar_urls.add(url)
-
-    print(f"[daily] Fetching {len(avatar_urls)} unique avatars")
-    avatars = _fetch_all_avatars(avatar_urls)
-
-    print(
-        f"[daily] Sending to {len(active_guilds)} guilds..."
-    )
-
+    GUILD_BATCH = 10
     succeeded = 0
     failed = 0
+    skipped = 0
     failures: list[str] = []
+    classic_count = 0
+    inferno_count = 0
 
-    for gid in active_guilds:
-        parts: list[str] = [_format_header()]
-        attachments: list[dict] = []
+    for bi in range(0, len(guild_ids), GUILD_BATCH):
+        batch = guild_ids[bi : bi + GUILD_BATCH]
+        batch_num = bi // GUILD_BATCH + 1
+        print(
+            f"[daily] Batch {batch_num} — {len(batch)} guilds"
+        )
 
-        if gid in classic_summaries:
-            parts.append(
-                _format_classic_section(classic_summaries[gid])
+        classic_summaries: dict[str, dict] = {}
+        inferno_summaries: dict[str, dict] = {}
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            classic_futures = {
+                pool.submit(_rpc_guild_summary, gid): gid
+                for gid in batch
+            }
+            inferno_futures = {
+                pool.submit(_rpc_guild_inferno_summary, gid): gid
+                for gid in batch
+            }
+
+            for f in classic_futures:
+                gid = classic_futures[f]
+                data = f.result()
+                if data and data.get("results"):
+                    classic_summaries[gid] = data
+
+            for f in inferno_futures:
+                gid = inferno_futures[f]
+                data = f.result()
+                if (
+                    data
+                    and data.get("results")
+                    and len(data["results"]) > 0
+                ):
+                    inferno_summaries[gid] = data
+
+        active = set(classic_summaries.keys()) | set(
+            inferno_summaries.keys()
+        )
+        skipped += len(batch) - len(active)
+        classic_count += len(classic_summaries)
+        inferno_count += len(inferno_summaries)
+
+        if not active:
+            continue
+
+        avatar_urls: set[str] = set()
+        for data in classic_summaries.values():
+            for r in data["results"]:
+                if url := r.get("avatar_url"):
+                    avatar_urls.add(url)
+        for data in inferno_summaries.values():
+            for r in data["results"]:
+                if url := r.get("avatar_url"):
+                    avatar_urls.add(url)
+
+        avatars = _fetch_all_avatars(avatar_urls)
+
+        for gid in active:
+            parts: list[str] = [_format_header()]
+            attachments: list[dict] = []
+
+            if gid in classic_summaries:
+                parts.append(
+                    _format_classic_section(
+                        classic_summaries[gid]
+                    )
+                )
+                png = _render_image(
+                    classic_summaries[gid]["results"], avatars
+                )
+                attachments.append(
+                    {
+                        "base64": base64.b64encode(png).decode(),
+                        "filename": "classic.png",
+                        "content_type": "image/png",
+                    }
+                )
+                del png
+
+            if gid in inferno_summaries:
+                inf = inferno_summaries[gid]
+                parts.append(_format_inferno_section(inf))
+                png = _render_inferno_image(
+                    inf["results"],
+                    avatars,
+                    inf.get("set_number", "?"),
+                )
+                attachments.append(
+                    {
+                        "base64": base64.b64encode(png).decode(),
+                        "filename": "inferno.png",
+                        "content_type": "image/png",
+                    }
+                )
+                del png
+
+            parts.append("New dailies are waiting!")
+            msg = "\n\n".join(parts)
+
+            targets = (
+                [test_channel]
+                if test_channel
+                else guild_channels.get(gid, [])
             )
-            png = _render_image(
-                classic_summaries[gid]["results"], avatars
-            )
-            attachments.append(
-                {
-                    "base64": base64.b64encode(png).decode(),
-                    "filename": "classic.png",
-                    "content_type": "image/png",
-                }
-            )
-            del png
+            for ch_id in targets:
+                ok = _send_message(
+                    ch_id,
+                    msg,
+                    components=DAILY_COMPONENTS,
+                    attachments=attachments,
+                )
+                if ok:
+                    succeeded += 1
+                else:
+                    failed += 1
+                    failures.append(ch_id)
 
-        if gid in inferno_summaries:
-            inf = inferno_summaries[gid]
-            parts.append(_format_inferno_section(inf))
-            png = _render_inferno_image(
-                inf["results"],
-                avatars,
-                inf.get("set_number", "?"),
-            )
-            attachments.append(
-                {
-                    "base64": base64.b64encode(png).decode(),
-                    "filename": "inferno.png",
-                    "content_type": "image/png",
-                }
-            )
-            del png
+            del attachments
 
-        parts.append("New dailies are waiting!")
-        msg = "\n\n".join(parts)
-
-        targets = [test_channel] if test_channel else guild_channels.get(gid, [])
-        for ch_id in targets:
-            ok = _send_message(
-                ch_id,
-                msg,
-                components=DAILY_COMPONENTS,
-                attachments=attachments,
-            )
-            if ok:
-                succeeded += 1
-            else:
-                failed += 1
-                failures.append(ch_id)
-
-        del attachments
-
-    avatars.clear()
+        avatars.clear()
+        del classic_summaries, inferno_summaries
 
     elapsed = round(time.time() - started, 1)
     report = (
@@ -785,9 +794,10 @@ def _run_daily_notifications(
 
     report_msg = (
         f"📊 **Daily notification report**\n"
-        f"Sent: {succeeded} | Skipped: {skipped} | Failed: {failed}\n"
-        f"Classic: {len(classic_summaries)} guilds | "
-        f"Inferno: {len(inferno_summaries)} guilds\n"
+        f"Sent: {succeeded} | Skipped: {skipped} | "
+        f"Failed: {failed}\n"
+        f"Classic: {classic_count} guilds | "
+        f"Inferno: {inferno_count} guilds\n"
         f"Duration: {elapsed}s"
     )
     if failures:
