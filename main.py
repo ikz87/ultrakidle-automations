@@ -577,7 +577,7 @@ def _format_classic_section(data: dict) -> str:
     for key, names in sorted_groups:
         prefix = "👑 " if key == best_key and key != "X/5" else ""
         emoji = rank_emojis.get(key, "")
-        lines.append(f"{emoji} {key}: {' | '.join(names)}")
+        lines.append(f"{emoji} {key}:\n> {' | '.join(names)}")
 
     streak = data.get("streak", 0)
     if streak == 1:
@@ -633,7 +633,7 @@ def _format_inferno_section(data: dict) -> str:
             prefix = "👑 " if tier == best_tier else ""
             names = " | ".join(grouped[tier])
             label = str(threshold) if threshold == 500 else f"{threshold}+"
-            lines.append(f"{emoji} {label}: {names}")
+            lines.append(f"{emoji} {label}:\n> {names}")
 
     return (
         f"**Infernoguessr #{set_number}**\n" + "\n".join(lines)
