@@ -557,10 +557,15 @@ def _format_classic_section(data: dict) -> str:
         "X/5": "<:drank:1485130996323057734>",
     }
 
+    def _display(r: dict) -> str:
+        if r.get("pings_opted_in") and r.get("discord_id"):
+            return f"<@{r['discord_id']}>"
+        return r["name"]
+
     grouped: dict[str, list[str]] = {}
     for r in data["results"]:
         key = f"{r['attempts']}/5" if r["is_win"] else "X/5"
-        grouped.setdefault(key, []).append(r["name"])
+        grouped.setdefault(key, []).append(_display(r))
 
     sorted_groups = sorted(
         grouped.items(),
@@ -604,6 +609,11 @@ def _format_inferno_section(data: dict) -> str:
         ("D-rank", 0, "<:drank:1485130996323057734>"),
     ]
 
+    def _display(r: dict) -> str:
+        if r.get("pings_opted_in") and r.get("discord_id"):
+            return f"<@{r['discord_id']}>"
+        return r["name"]
+
     grouped: dict[str, list[str]] = {}
     for r in results:
         score = r.get("total_score", 0)
@@ -612,7 +622,7 @@ def _format_inferno_section(data: dict) -> str:
             if score >= threshold:
                 tier = name
                 break
-        grouped.setdefault(tier, []).append(r["name"])
+        grouped.setdefault(tier, []).append(_display(r))
 
     best_tier = None
     lines = []
@@ -632,31 +642,17 @@ def _format_inferno_section(data: dict) -> str:
 # ── Supabase + Edge function calls ──
 
 
-def _rpc_guild_summary(guild_id: str) -> dict | None:
+def _rpc_guild_combined_summary(guild_id: str) -> dict | None:
     sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     while True:
         try:
             res = sb.rpc(
-                "get_guild_daily_summary", {"p_guild_id": guild_id}
-            ).execute()
-            return res.data
-        except Exception as e:
-            print(f"[{guild_id}] RPC error: {e}, retrying in 2s")
-            time.sleep(2)
-
-def _rpc_guild_inferno_summary(guild_id: str) -> dict | None:
-    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    while True:
-        try:
-            res = sb.rpc(
-                "get_guild_inferno_summary",
+                "get_guild_combined_summary",
                 {"p_guild_id": guild_id},
             ).execute()
             return res.data
         except Exception as e:
-            print(
-                f"[{guild_id}] Inferno RPC error: {e}, retrying in 2s"
-            )
+            print(f"[{guild_id}] RPC error: {e}, retrying in 2s")
             time.sleep(2)
 
 
@@ -710,30 +706,28 @@ def _run_daily_notifications(
         inferno_summaries: dict[str, dict] = {}
 
         with ThreadPoolExecutor(max_workers=5) as pool:
-            classic_futures = {
-                pool.submit(_rpc_guild_summary, gid): gid
-                for gid in batch
-            }
-            inferno_futures = {
-                pool.submit(_rpc_guild_inferno_summary, gid): gid
+            futures = {
+                pool.submit(_rpc_guild_combined_summary, gid): gid
                 for gid in batch
             }
 
-            for f in classic_futures:
-                gid = classic_futures[f]
+            for f in futures:
+                gid = futures[f]
                 data = f.result()
-                if data and data.get("results"):
-                    classic_summaries[gid] = data
+                if not data:
+                    continue
 
-            for f in inferno_futures:
-                gid = inferno_futures[f]
-                data = f.result()
+                daily = data.get("daily")
+                if daily and daily.get("results"):
+                    classic_summaries[gid] = daily
+
+                inferno = data.get("inferno")
                 if (
-                    data
-                    and data.get("results")
-                    and len(data["results"]) > 0
+                    inferno
+                    and inferno.get("results")
+                    and len(inferno["results"]) > 0
                 ):
-                    inferno_summaries[gid] = data
+                    inferno_summaries[gid] = inferno
 
         active = set(classic_summaries.keys()) | set(
             inferno_summaries.keys()
