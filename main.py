@@ -846,79 +846,54 @@ def _run_refetch_submitters():
         print("[refetch] No profiles found")
         return
 
-    print(f"[refetch] {len(profiles)} profiles to sync")
+    all_uids = [row["discord_user_id"] for row in profiles]
+    print(f"[refetch] {len(all_uids)} profiles to sync")
 
+    BATCH_SIZE = 15
     updated = 0
     failed = 0
     failures: list[str] = []
 
-    for i, row in enumerate(profiles):
-        uid = row["discord_user_id"]
+    for i in range(0, len(all_uids), BATCH_SIZE):
+        batch = all_uids[i : i + BATCH_SIZE]
+        batch_num = i // BATCH_SIZE + 1
+        print(
+            f"[refetch] Batch {batch_num} ({len(batch)} users)"
+        )
 
-        MAX_RETRIES = 3
-        MAX_RETRY_AFTER = 30.0
+        data = _call_edge(
+            "refetch-submitters", {"user_ids": batch}
+        )
+        if not data or not data.get("results"):
+            print(f"[refetch] Batch {batch_num} failed")
+            failed += len(batch)
+            failures.extend(batch)
+            continue
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                res = requests.get(
-                    f"{DISCORD_API}/users/{uid}",
-                    headers=DISCORD_HEADERS,
-                    timeout=10,
+        for r in data["results"]:
+            uid = r["discord_user_id"]
+            if r.get("error"):
+                print(
+                    f"[refetch] {uid} error: {r['error']}"
                 )
-            except Exception as e:
-                print(f"[refetch] [{i+1}/{len(profiles)}] {uid} request error: {e}")
                 failed += 1
                 failures.append(uid)
-                break
-
-            if res.status_code == 429:
-                retry_after = float(res.headers.get("retry-after", "1"))
-                if retry_after > MAX_RETRY_AFTER:
-                    print(
-                        f"[refetch] [{i+1}/{len(profiles)}] {uid} "
-                        f"rate limited for {retry_after}s, skipping"
-                    )
-                    failed += 1
-                    failures.append(uid)
-                    time.sleep(MAX_RETRY_AFTER)
-                    break
-                print(
-                    f"[refetch] Rate limited on {uid}, "
-                    f"retrying after {retry_after}s"
-                )
-                time.sleep(retry_after)
                 continue
 
-            if not res.ok:
-                print(
-                    f"[refetch] [{i+1}/{len(profiles)}] {uid} "
-                    f"Discord error {res.status_code}"
-                )
-                failed += 1
-                failures.append(uid)
-                break
-
-            user = res.json()
-            display_name = user.get("global_name") or user.get(
-                "username"
-            )
-            avatar_hash = user.get("avatar")
-            if avatar_hash:
-                ext = "gif" if avatar_hash.startswith("a_") else "png"
-                avatar_url = (
-                    f"https://cdn.discordapp.com/avatars/"
-                    f"{uid}/{avatar_hash}.{ext}?size=128"
-                )
-            else:
-                avatar_url = None
-
             try:
+                print(
+                    f"[refetch] {uid} "
+                    f"name={r['discord_name']!r} "
+                    f"avatar={'yes' if r['discord_avatar_url'] else 'no'}"
+                )
                 sb.from_("submitter_profiles").upsert(
                     {
                         "discord_user_id": uid,
-                        "discord_name": display_name,
-                        "discord_avatar_url": avatar_url,
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "discord_name": r["discord_name"],
+                        "discord_avatar_url": r["discord_avatar_url"],
+                        "updated_at": datetime.now(
+                            timezone.utc
+                        ).isoformat(),
                     },
                     on_conflict="discord_user_id",
                 ).execute()
@@ -928,14 +903,6 @@ def _run_refetch_submitters():
                 failed += 1
                 failures.append(uid)
 
-            break
-        else:
-            print(f"[refetch] [{i+1}/{len(profiles)}] {uid} max retries exceeded")
-            failed += 1
-            failures.append(uid)
-
-        time.sleep(2)
-
     elapsed = round(time.time() - started, 1)
     print(
         f"[refetch] Done in {elapsed}s — "
@@ -944,7 +911,7 @@ def _run_refetch_submitters():
 
     report_msg = (
         f"📊 **Submitter profile sync report**\n"
-        f"Processed: {len(profiles)} | Updated: {updated} | "
+        f"Processed: {len(all_uids)} | Updated: {updated} | "
         f"Failed: {failed}\n"
         f"Duration: {elapsed}s"
     )
