@@ -1164,6 +1164,49 @@ def poll_submissions(
     background_tasks.add_task(_run_poll_submissions, report_channel)
     return {"ok": True, "status": "started"}
 
+@app.post("/admin/force-approve-submission")
+def force_approve_submission(
+    request: Request,
+    message_id: str = Query(..., description="Discord message ID of the submission"),
+):
+    auth = request.headers.get("Authorization")
+    if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, 401)
+
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+    row = (
+        sb.from_("image_submissions")
+        .select("*")
+        .eq("message_id", message_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if not row.data:
+        return JSONResponse(
+            {"ok": False, "error": "Submission not found"}, 404
+        )
+
+    submission = row.data
+
+    result = _call_edge(
+        "submissions-resolve",
+        {"submissions": [submission], "force_approve": True},
+    )
+
+    if not result:
+        return JSONResponse(
+            {"ok": False, "error": "Resolve edge function failed"}, 502
+        )
+
+    return {
+        "ok": True,
+        "submission_id": submission["id"],
+        "previous_status": submission["status"],
+        "resolve_result": result,
+    }
+
 
 @app.get("/health")
 def health():
