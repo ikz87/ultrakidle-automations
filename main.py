@@ -78,13 +78,8 @@ def _send_message(
     bot: str = "main",
     components: list[dict] | None = None,
     attachments: list[dict] | None = None,
+    max_retries: int = 5,
 ) -> bool:
-    """
-    Send a message via the send-message edge function.
-
-    attachments: list of {"base64": str, "filename": str, "content_type": str}
-    bot: "main" or "automation"
-    """
     payload: dict = {"channel_id": channel_id, "bot": bot}
     if message:
         payload["message"] = message
@@ -93,7 +88,7 @@ def _send_message(
     if attachments:
         payload["attachments"] = attachments
 
-    while True:
+    for attempt in range(max_retries):
         try:
             res = requests.post(
                 f"{SUPABASE_FUNCTIONS_URL}/send-message",
@@ -107,20 +102,29 @@ def _send_message(
             data = safe_json(res)
             if data and data.get("ok"):
                 return True
-            if res.status_code == 502:
+            if res.status_code in (400, 401, 403, 404, 502):
                 print(
-                    f"[{channel_id}] Discord rejected: "
+                    f"[{channel_id}] Non-retryable error "
+                    f"({res.status_code}): "
                     f"{data.get('error') if data else res.text[:200]}"
                 )
                 return False
             print(
-                f"[{channel_id}] Edge error {res.status_code}, "
+                f"[{channel_id}] Edge error {res.status_code} "
+                f"(attempt {attempt + 1}/{max_retries}), "
                 "retrying in 3s"
             )
             time.sleep(3)
         except Exception as e:
-            print(f"[{channel_id}] Request error: {e}, retrying in 5s")
+            print(
+                f"[{channel_id}] Request error "
+                f"(attempt {attempt + 1}/{max_retries}): {e}, "
+                "retrying in 5s"
+            )
             time.sleep(5)
+
+    print(f"[{channel_id}] Failed after {max_retries} attempts")
+    return False
 
 
 _SCALE = 1
@@ -173,9 +177,12 @@ def safe_json(res: requests.Response):
 
 # ── Avatar helpers ──
 
-
-def _call_edge(fn_name: str, payload: dict | None = None) -> dict | None:
-    while True:
+def _call_edge(
+    fn_name: str,
+    payload: dict | None = None,
+    max_retries: int = 5,
+) -> dict | None:
+    for attempt in range(max_retries):
         try:
             res = requests.post(
                 f"{SUPABASE_FUNCTIONS_URL}/{fn_name}",
@@ -189,20 +196,28 @@ def _call_edge(fn_name: str, payload: dict | None = None) -> dict | None:
             data = safe_json(res)
             if res.ok and data:
                 return data
-            if res.status_code in (401, 500):
+            if res.status_code in (400, 401, 403, 404, 500):
                 print(
                     f"[edge] {fn_name} returned {res.status_code}, "
                     f"aborting: {res.text[:200]}"
                 )
                 return None
             print(
-                f"[edge] {fn_name} returned {res.status_code}, "
+                f"[edge] {fn_name} returned {res.status_code} "
+                f"(attempt {attempt + 1}/{max_retries}), "
                 "retrying in 3s"
             )
             time.sleep(3)
         except Exception as e:
-            print(f"[edge] {fn_name} request error: {e}, retrying in 5s")
+            print(
+                f"[edge] {fn_name} request error "
+                f"(attempt {attempt + 1}/{max_retries}): {e}, "
+                "retrying in 5s"
+            )
             time.sleep(5)
+
+    print(f"[edge] {fn_name} failed after {max_retries} attempts")
+    return None
 
 
 def _fetch_avatar(url: str, retries: int = 3) -> PILImage.Image | None:
@@ -641,10 +656,10 @@ def _format_inferno_section(data: dict) -> str:
 
 # ── Supabase + Edge function calls ──
 
-
 def _rpc_guild_combined_summary(guild_id: str) -> dict | None:
     sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    while True:
+    max_retries = 5
+    for attempt in range(max_retries):
         try:
             res = sb.rpc(
                 "get_guild_combined_summary",
@@ -652,8 +667,22 @@ def _rpc_guild_combined_summary(guild_id: str) -> dict | None:
             ).execute()
             return res.data
         except Exception as e:
-            print(f"[{guild_id}] RPC error: {e}, retrying in 2s")
+            msg = str(e)
+            if any(
+                s in msg
+                for s in ("Access denied", "P0001", "not a member")
+            ):
+                print(f"[{guild_id}] Permanent RPC error: {e}")
+                return None
+            print(
+                f"[{guild_id}] RPC error "
+                f"(attempt {attempt + 1}/{max_retries}): {e}, "
+                "retrying in 2s"
+            )
             time.sleep(2)
+
+    print(f"[{guild_id}] RPC failed after {max_retries} attempts")
+    return None
 
 
 # ── Orchestrator ──
@@ -833,6 +862,33 @@ def _run_daily_notifications(
 def _run_refetch_submitters():
     started = time.time()
     sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+    # Sync new submitters from image_submissions
+    new_submitters = (
+        sb.from_("image_submissions")
+        .select("discord_user_id, discord_name, discord_avatar_url")
+        .execute()
+        .data
+        or []
+    )
+
+    seen = set()
+    for s in new_submitters:
+        uid = s["discord_user_id"]
+        if uid in seen:
+            continue
+        seen.add(uid)
+        sb.from_("submitter_profiles").upsert(
+            {
+                "discord_user_id": uid,
+                "discord_name": s["discord_name"],
+                "discord_avatar_url": s.get("discord_avatar_url"),
+            },
+            on_conflict="discord_user_id",
+            ignore_duplicates=True,
+        ).execute()
+
+    print(f"[refetch] Ensured {len(seen)} submitter profiles exist")
 
     profiles = (
         sb.from_("submitter_profiles")
