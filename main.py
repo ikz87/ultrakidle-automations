@@ -71,6 +71,25 @@ DAILY_COMPONENTS = [
 ]
 
 
+def _fetch_all_submissions(sb):
+    """Paginates through all image_submissions records."""
+    all_data = []
+    limit = 1000
+    offset = 0
+    while True:
+        res = (
+            sb.from_("image_submissions")
+            .select("id, level_id, discord_user_id, status")
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        data = res.data or []
+        all_data.extend(data)
+        if len(data) < limit:
+            break
+        offset += limit
+    return all_data
+
 def _send_message(
     channel_id: str,
     message: str | None = None,
@@ -1063,14 +1082,8 @@ def _run_poll_submissions(report_channel: str | None):
     # ── Phase 4: Build summary report ──
     print("[submissions] Phase 4: Building report")
 
-    approved_subs = (
-        sb.from_("image_submissions")
-        .select("id, level_id, discord_user_id")
-        .eq("status", "approved")
-        .execute()
-        .data
-        or []
-    )
+    all_subs = _fetch_all_submissions(sb)
+    approved_subs = [s for s in all_subs if s["status"] == "approved"]
 
     levels = (
         sb.from_("levels")
@@ -1091,7 +1104,7 @@ def _run_poll_submissions(report_channel: str | None):
         f"**Expired:** {total_expired} | "
         f"**Skipped:** {total_skipped}",
     ]
-
+    
     if approved_subs and levels:
         level_counts: dict[str, int] = {}
         user_counts: dict[str, int] = {}
@@ -1169,8 +1182,90 @@ def _run_poll_submissions(report_channel: str | None):
     print(f"[submissions] Done in {elapsed}s")
     _send_message(report_ch, report_msg, bot="automation")
 
+def _send_stats_report(report_ch: str):
+    """Internal helper to generate the stats report without a scan."""
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    all_subs = _fetch_all_submissions(sb)
+    approved_subs = [s for s in all_subs if s["status"] == "approved"]
 
-# ── Endpoint ──
+    levels = (
+        sb.from_("levels")
+        .select("id, level_number, level_name")
+        .execute()
+        .data
+        or []
+    )
+
+    level_counts: dict[str, int] = {}
+    user_counts: dict[str, int] = {}
+    for s in approved_subs:
+        level_counts[s["level_id"]] = level_counts.get(s["level_id"], 0) + 1
+        user_counts[s["discord_user_id"]] = (
+            user_counts.get(s["discord_user_id"], 0) + 1
+        )
+
+    level_stats = [
+        {
+            "number": l["level_number"],
+            "name": l["level_name"],
+            "count": level_counts.get(l["id"], 0),
+        }
+        for l in levels
+    ]
+
+    least_10 = sorted(level_stats, key=lambda x: x["count"])[:10]
+    most_10 = sorted(level_stats, key=lambda x: x["count"], reverse=True)[:10]
+    top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    user_ids = [uid for uid, _ in top_users]
+    profiles = (
+        sb.from_("submitter_profiles")
+        .select("discord_user_id, discord_name")
+        .in_("discord_user_id", user_ids)
+        .execute()
+        .data
+        or []
+    )
+    name_map = {p["discord_user_id"]: p["discord_name"] for p in profiles}
+
+    def fmt_levels(lst):
+        return "\n".join(
+            f"{i+1}. **{l['number']}** — {l['name']} ({l['count']})"
+            for i, l in enumerate(lst)
+        )
+
+    def fmt_users(lst):
+        return "\n".join(
+            f"{i+1}. **{name_map.get(uid, uid)}** — {count} approved"
+            for i, (uid, count) in enumerate(lst)
+        )
+
+    report_msg = (
+        "📊 **Current Submissions Stats**\n\n"
+        f"**Total approved:** {len(approved_subs)}\n\n"
+        "📉 **Levels with fewest submissions:**\n"
+        f"{fmt_levels(least_10)}\n\n"
+        "📈 **Levels with most submissions:**\n"
+        f"{fmt_levels(most_10)}\n\n"
+        "🏆 **Top contributors:**\n"
+        f"{fmt_users(top_users)}"
+    )
+    _send_message(report_ch, report_msg, bot="automation")
+
+
+@app.post("/test/submissions-report")
+def test_submissions_report(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    report_channel: str | None = Query(None),
+):
+    auth = request.headers.get("Authorization")
+    if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, 401)
+
+    target = report_channel or REPORT_CHANNEL_ID
+    background_tasks.add_task(_send_stats_report, target)
+    return {"ok": True, "status": "report generation started"}
 
 @app.post("/cron/refetch-submitters-data")
 def refetch_submitters_data(
