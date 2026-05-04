@@ -882,47 +882,20 @@ def _run_refetch_submitters():
     started = time.time()
     sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-    # Sync new submitters from image_submissions
-    new_submitters = (
-        sb.from_("image_submissions")
-        .select("discord_user_id, discord_name, discord_avatar_url")
-        .execute()
-        .data
-        or []
-    )
-
-    seen = set()
-    for s in new_submitters:
-        uid = s["discord_user_id"]
-        if uid in seen:
-            continue
-        seen.add(uid)
-        sb.from_("submitter_profiles").upsert(
-            {
-                "discord_user_id": uid,
-                "discord_name": s["discord_name"],
-                "discord_avatar_url": s.get("discord_avatar_url"),
-            },
-            on_conflict="discord_user_id",
-            ignore_duplicates=True,
-        ).execute()
-
-    print(f"[refetch] Ensured {len(seen)} submitter profiles exist")
-
-    profiles = (
+    # Get all existing profile IDs to refresh their data from Discord
+    res = (
         sb.from_("submitter_profiles")
         .select("discord_user_id")
         .execute()
-        .data
-        or []
     )
-
-    if not profiles:
-        print("[refetch] No profiles found")
+    
+    all_uids = [row["discord_user_id"] for row in (res.data or [])]
+    
+    if not all_uids:
+        print("[refetch] No submitters found in records")
         return
 
-    all_uids = [row["discord_user_id"] for row in profiles]
-    print(f"[refetch] {len(all_uids)} profiles to sync")
+    print(f"[refetch] Syncing {len(all_uids)} profiles from Discord API")
 
     BATCH_SIZE = 15
     updated = 0
