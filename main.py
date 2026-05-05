@@ -70,16 +70,23 @@ DAILY_COMPONENTS = [
     },
 ]
 
-
 def _fetch_all_submissions(sb):
-    """Paginates through all image_submissions records."""
+    """Fetches all records using RPC for speed, falls back to paginated select."""
+    try:
+        # Use the new RPC for efficiency
+        res = sb.rpc("get_submission_stats", {}).execute()
+        if res.data and "all_submissions" in res.data:
+            return res.data["all_submissions"]
+    except Exception as e:
+        print(f"[debug] RPC failed, falling back to paginated select: {e}")
+
     all_data = []
     limit = 1000
     offset = 0
     while True:
         res = (
             sb.from_("image_submissions")
-            .select("id, level_id, discord_user_id, status")
+            .select("id, level_id, submitter_id, status")
             .range(offset, offset + limit - 1)
             .execute()
         )
@@ -1085,9 +1092,8 @@ def _run_poll_submissions(report_channel: str | None):
             level_counts[s["level_id"]] = (
                 level_counts.get(s["level_id"], 0) + 1
             )
-            user_counts[s["discord_user_id"]] = (
-                user_counts.get(s["discord_user_id"], 0) + 1
-            )
+            uid = s["submitter_id"]
+            user_counts[uid] = user_counts.get(uid, 0) + 1
 
         level_stats = [
             {
@@ -1107,18 +1113,17 @@ def _run_poll_submissions(report_channel: str | None):
             user_counts.items(), key=lambda x: x[1], reverse=True
         )[:5]
 
-        # Resolve user display names from submitter_profiles
-        user_ids = [uid for uid, _ in top_users]
+        profile_ids = [uid for uid, _ in top_users]
         profiles = (
             sb.from_("submitter_profiles")
-            .select("discord_user_id, discord_name")
-            .in_("discord_user_id", user_ids)
+            .select("id, discord_name")
+            .in_("id", profile_ids)
             .execute()
             .data
             or []
         )
         name_map = {
-            p["discord_user_id"]: p["discord_name"] for p in profiles
+            p["id"]: p["discord_name"] for p in profiles
         }
 
         def fmt_levels(lst):
@@ -1133,7 +1138,6 @@ def _run_poll_submissions(report_channel: str | None):
                 f"{count} approved submission{'s' if count != 1 else ''}"
                 for i, (uid, count) in enumerate(lst)
             )
-
         report_lines += [
             "",
             f"**Total approved (all time):** {len(approved_subs)}",
@@ -1173,9 +1177,20 @@ def _send_stats_report(report_ch: str):
     user_counts: dict[str, int] = {}
     for s in approved_subs:
         level_counts[s["level_id"]] = level_counts.get(s["level_id"], 0) + 1
-        user_counts[s["discord_user_id"]] = (
-            user_counts.get(s["discord_user_id"], 0) + 1
-        )
+        uid = s["submitter_id"]
+        user_counts[uid] = user_counts.get(uid, 0) + 1
+
+    top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    profile_ids = [uid for uid, _ in top_users]
+    profiles = (
+        sb.from_("submitter_profiles")
+        .select("id, discord_name")
+        .in_("id", profile_ids)
+        .execute()
+        .data
+        or []
+    )
+    name_map = {p["id"]: p["discord_name"] for p in profiles}
 
     level_stats = [
         {
@@ -1190,16 +1205,16 @@ def _send_stats_report(report_ch: str):
     most_10 = sorted(level_stats, key=lambda x: x["count"], reverse=True)[:10]
     top_users = sorted(user_counts.items(), key=lambda x: x[1], reverse=True)[:5]
 
-    user_ids = [uid for uid, _ in top_users]
+    profile_ids = [uid for uid, _ in top_users]
     profiles = (
         sb.from_("submitter_profiles")
-        .select("discord_user_id, discord_name")
-        .in_("discord_user_id", user_ids)
+        .select("id, discord_name")
+        .in_("id", profile_ids)
         .execute()
         .data
         or []
     )
-    name_map = {p["discord_user_id"]: p["discord_name"] for p in profiles}
+    name_map = {p["id"]: p["discord_name"] for p in profiles}
 
     def fmt_levels(lst):
         return "\n".join(
