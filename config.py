@@ -20,13 +20,20 @@ LEVEL_PATTERN = re.compile(
 )
 REPORT_CHANNEL_ID = "1484843417736314932"
 
+R2_ACCESS_KEY_ID = os.environ["R2_ACCESS_KEY_ID"]
+R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
+R2_S3_ENDPOINT = os.environ["R2_S3_ENDPOINT"]  # https://<id>.r2.cloudflarestorage.com
+
+LEVEL_IMAGES_URL = "https://gallery.ultrakidle.online"
+CYBERGRIND_IMAGES_URL = "https://cgimages.ultrakidle.online"
+
 DISCORD_HEADERS = {
     "Authorization": f"Bot {BOT_TOKEN}",
     "Content-Type": "application/json",
     "User-Agent": "DiscordBot (https://ultrakidle.online, 1.0)",
 }
 SUPABASE_FUNCTIONS_URL = f"{SUPABASE_URL}/functions/v1"
-SUBMISSIONS_BATCH_SIZE = 10
+SUBMISSIONS_BATCH_SIZE = 5
 SUBMISSIONS_REPORT_CHANNEL_ID = "1481872631144775680"
 
 DAILY_COMPONENTS = [

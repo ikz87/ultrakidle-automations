@@ -1,4 +1,5 @@
 import io
+import gc
 import math
 import time
 import requests
@@ -6,6 +7,7 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from PIL import ImageDraw, ImageFont
 from PIL import Image as PILImage
+from PIL import ImageOps
 
 from config import (
     FONT_FILE,
@@ -37,6 +39,47 @@ from config import (
     _INF_STAT_FS,
     _INF_SCORE_FS,
 )
+
+
+def apply_effects(img: PILImage.Image, effects: list[str]) -> PILImage.Image:
+    out = img.convert("RGBA")
+    
+    # Pre-defined order to ensure consistency
+    order = ["GRAYSCALE", "PIXELIZE", "JIGSAW"]
+    active_effects = [e for e in order if e in [eff.upper() for eff in effects]]
+
+    for effect in active_effects:
+        if effect == "GRAYSCALE":
+            alpha = out.getchannel("A")
+            out = ImageOps.grayscale(out).convert("RGBA")
+            out.putalpha(alpha)
+            
+        elif effect == "PIXELIZE":
+            w, h = out.size
+            out = out.resize((w // 16, h // 16), PILImage.NEAREST)
+            out = out.resize((w, h), PILImage.NEAREST)
+            
+        elif effect == "JIGSAW":
+            w, h = out.size
+            rows, cols = 4, 4
+            rw, rh = w // cols, h // rows
+            grid = []
+            for r in range(rows):
+                for c in range(cols):
+                    box = (c * rw, r * rh, (c + 1) * rw, (r + 1) * rh)
+                    grid.append(out.crop(box))
+            
+            import random
+            random.shuffle(grid)
+            
+            new_out = PILImage.new("RGBA", (w, h))
+            for i, tile in enumerate(grid):
+                tx = (i % cols) * rw
+                ty = (i // cols) * rh
+                new_out.paste(tile, (tx, ty))
+            out = new_out
+            
+    return out
 
 @lru_cache(maxsize=None)
 def _font(size: int) -> ImageFont.FreeTypeFont:
@@ -77,7 +120,7 @@ def _fetch_all_avatars(
     urls: set[str],
 ) -> dict[str, PILImage.Image | None]:
     results: dict[str, PILImage.Image | None] = {}
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(_fetch_avatar, u): u for u in urls if u}
         for f in futures:
             img = f.result()
@@ -365,8 +408,9 @@ def _render_daily_image(
     for p in panels:
         img.paste(p, (0, y))
         y += p.height + gap
-        p.close()
+        p.close() # Explicitly close child canvases
     panels.clear()
+    gc.collect() # Trigger GC after closing large objects
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)

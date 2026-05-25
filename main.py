@@ -1,6 +1,10 @@
+import requests
 from fastapi import FastAPI, Request, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 from supabase import create_client
+from utils import get_r2_client
+from image_renderer import apply_effects
+from pydantic import BaseModel
 
 # Re-exports for backwards compatibility with external scripts, tests, and task environments
 from config import (
@@ -48,6 +52,58 @@ from tasks import (
 )
 
 app = FastAPI()
+
+class CybergrindSetupRequest(BaseModel):
+    source_path: str
+    target_path: str
+    effects: list[str] = []
+
+@app.post("/admin/setup-cybergrind-image")
+def setup_cybergrind_image(
+    request: Request,
+    data: CybergrindSetupRequest,
+    background_tasks: BackgroundTasks,
+):
+    auth = request.headers.get("Authorization")
+    if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, 401)
+
+    background_tasks.add_task(_process_cybergrind_transfer, data)
+    return {"ok": True}
+
+def _process_cybergrind_transfer(data: CybergrindSetupRequest):
+    import io
+    from PIL import Image as PILImage
+    from utils import get_r2_client
+    # from image_renderer import apply_effects # Uncomment when you add apply_effects
+
+    s3 = get_r2_client()
+    try:
+        # Download from level-images
+        source_url = f"https://gallery.ultrakidle.online/{data.source_path}"
+        res = requests.get(source_url, timeout=30)
+        if not res.ok:
+            return
+
+        img = PILImage.open(io.BytesIO(res.content))
+        
+        # Apply effects (currently returns original if list is empty)
+        # img = apply_effects(img, data.effects) 
+
+        buf = io.BytesIO()
+        ext = data.target_path.split(".")[-1].lower()
+        fmt = "PNG" if ext == "png" else "JPEG"
+        img.save(buf, format=fmt, optimize=True)
+        buf.seek(0)
+
+        s3.put_object(
+            Bucket="inferno-cybergrind",
+            Key=data.target_path,
+            Body=buf,
+            ContentType=f"image/{ext}",
+        )
+    except Exception as e:
+        print(f"[cybergrind] Processing error: {e}")
 
 
 @app.post("/test/submissions-report")

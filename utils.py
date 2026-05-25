@@ -1,6 +1,17 @@
 import time
 import requests
 from config import SUPABASE_FUNCTIONS_URL, SUPABASE_SERVICE_ROLE_KEY
+import boto3
+from config import R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_S3_ENDPOINT
+
+
+def get_r2_client():
+    return boto3.client(
+        "s3",
+        endpoint_url=R2_S3_ENDPOINT,
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+    )
 
 def safe_json(res: requests.Response):
     try:

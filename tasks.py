@@ -105,7 +105,7 @@ def _run_daily_notifications(
         f"{len(guild_ids)} guilds"
     )
 
-    GUILD_BATCH = 5
+    GUILD_BATCH = 2
     succeeded = 0
     failed = 0
     skipped = 0
@@ -171,33 +171,27 @@ def _run_daily_notifications(
 
         for gid in active:
             parts: list[str] = [_format_header()]
+            c_data = classic_summaries.get(gid)
+            i_data = inferno_summaries.get(gid)
 
-            if gid in classic_summaries:
-                parts.append(
-                    _format_classic_section(classic_summaries[gid])
-                )
-            if gid in inferno_summaries:
-                parts.append(
-                    _format_inferno_section(inferno_summaries[gid])
-                )
+            if c_data:
+                parts.append(_format_classic_section(c_data))
+            if i_data:
+                parts.append(_format_inferno_section(i_data))
 
             parts.append("New dailies are waiting!")
             msg = "\n\n".join(parts)
 
-            png = _render_daily_image(
-                classic_summaries.get(gid, {}).get("results"),
-                inferno_summaries.get(gid),
-                avatars,
-            )
-
-            attachments: list[dict] = []
-            if png:
-                attachments.append(
-                    {
-                        "base64": base64.b64encode(png).decode(),
-                        "filename": "results.png",
-                        "content_type": "image/png",
-                    }
+            # Check combined player count against threshold
+            c_count = len(c_data["results"]) if c_data else 0
+            i_count = len(i_data["results"]) if i_data else 0
+            
+            png = None
+            if (c_count + i_count) <= 80:
+                png = _render_daily_image(
+                    c_data["results"] if c_data else None,
+                    i_data,
+                    avatars,
                 )
                 del png
 
