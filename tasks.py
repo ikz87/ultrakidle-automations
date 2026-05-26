@@ -170,43 +170,58 @@ def _run_daily_notifications(
         avatars = _fetch_all_avatars(avatar_urls)
 
         for gid in active:
-            parts: list[str] = [_format_header()]
+            header = _format_header()
+            footer = "New dailies are waiting!"
             c_data = classic_summaries.get(gid)
             i_data = inferno_summaries.get(gid)
 
-            if c_data:
-                parts.append(_format_classic_section(c_data))
-            if i_data:
-                parts.append(_format_inferno_section(i_data))
+            c_text = _format_classic_section(c_data) if c_data else ""
+            i_text = _format_inferno_section(i_data) if i_data else ""
 
-            parts.append("New dailies are waiting!")
-            msg = "\n\n".join(parts)
-
-            # Check combined player count against threshold
+            # Prepare image attachment
+            attachments = []
             c_count = len(c_data["results"]) if c_data else 0
             i_count = len(i_data["results"]) if i_data else 0
             
-            png = None
-            if (c_count + i_count) <= 80:
-                png = _render_daily_image(
+            if (c_count + i_count) <= 100:
+                png_data = _render_daily_image(
                     c_data["results"] if c_data else None,
                     i_data,
                     avatars,
                 )
-                del png
+                if png_data:
+                    attachments.append({
+                        "data": base64.b64encode(png_data).decode("utf-8"),
+                        "filename": "results.png"
+                    })
 
-            targets = (
-                [test_channel]
-                if test_channel
-                else guild_channels.get(gid, [])
-            )
+            # Check if we need to split
+            full_msg = "\n\n".join(filter(None, [header, c_text, i_text, footer]))
+            
+            targets = [test_channel] if test_channel else guild_channels.get(gid, [])
+
             for ch_id in targets:
-                ok = _send_message(
-                    ch_id,
-                    msg,
-                    components=DAILY_COMPONENTS,
-                    attachments=attachments,
-                )
+                if len(full_msg) > 2000:
+                    # Message 1: Header + Classic
+                    msg1 = "\n\n".join(filter(None, [header, c_text]))
+                    _send_message(ch_id, msg1)
+
+                    # Message 2: Inferno + Footer + Attachments + Components
+                    msg2 = "\n\n".join(filter(None, [i_text, footer]))
+                    ok = _send_message(
+                        ch_id, 
+                        msg2, 
+                        components=DAILY_COMPONENTS, 
+                        attachments=attachments
+                    )
+                else:
+                    ok = _send_message(
+                        ch_id,
+                        full_msg,
+                        components=DAILY_COMPONENTS,
+                        attachments=attachments
+                    )
+                
                 if ok:
                     succeeded += 1
                 else:
