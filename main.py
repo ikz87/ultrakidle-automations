@@ -134,6 +134,7 @@ def refetch_submitters_data(
     return {"ok": True, "status": "started"}
 
 
+
 @app.post("/cron/daily-notifications")
 def daily_notifications(
     request: Request,
@@ -144,13 +145,16 @@ def daily_notifications(
     test_channel: str | None = Query(
         None, description="Redirect ALL sends to this channel"
     ),
+    exclude_channel: str | None = Query(
+        None, description="Skip this channel"
+    ),
 ):
     auth = request.headers.get("Authorization")
     if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
         return JSONResponse({"ok": False, "error": "Unauthorized"}, 401)
 
     background_tasks.add_task(
-        _run_daily_notifications, filter_channel, test_channel
+        _run_daily_notifications, filter_channel, test_channel, exclude_channel
     )
     return {"ok": True, "status": "started"}
 
@@ -213,6 +217,19 @@ def force_approve_submission(
         "previous_status": submission["status"],
         "resolve_result": result,
     }
+
+@app.post("/cron/cybergrind-cleanup")
+def cybergrind_cleanup(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    auth = request.headers.get("Authorization")
+    if auth != f"Bearer {SUPABASE_SERVICE_ROLE_KEY}":
+        return JSONResponse({"ok": False, "error": "Unauthorized"}, 401)
+
+    from tasks import _run_cybergrind_cleanup
+    background_tasks.add_task(_run_cybergrind_cleanup)
+    return {"ok": True, "status": "cleanup started"}
 
 
 @app.get("/health")

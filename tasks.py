@@ -77,7 +77,9 @@ def _rpc_guild_combined_summary(guild_id: str) -> dict | None:
 
 
 def _run_daily_notifications(
-    filter_channel: str | None, test_channel: str | None
+    filter_channel: str | None,
+    test_channel: str | None,
+    exclude_channel: str | None = None,
 ):
     started = time.time()
     sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -95,9 +97,10 @@ def _run_daily_notifications(
 
     guild_channels: dict[str, list[str]] = {}
     for row in channels:
-        guild_channels.setdefault(row["guild_id"], []).append(
-            row["channel_id"]
-        )
+        ch = row["channel_id"]
+        if exclude_channel and ch == exclude_channel:
+            continue
+        guild_channels.setdefault(row["guild_id"], []).append(ch)
 
     guild_ids = list(guild_channels.keys())
     print(
@@ -178,48 +181,51 @@ def _run_daily_notifications(
             c_text = _format_classic_section(c_data) if c_data else ""
             i_text = _format_inferno_section(i_data) if i_data else ""
 
-            # Prepare image attachment
             attachments = []
             c_count = len(c_data["results"]) if c_data else 0
             i_count = len(i_data["results"]) if i_data else 0
             
-            if (c_count + i_count) <= 100:
+            # Reset png_data each iteration to prevent leaking images across guilds
+            png_data = None
+            if 0 < (c_count + i_count) <= 100:
                 png_data = _render_daily_image(
                     c_data["results"] if c_data else None,
                     i_data,
                     avatars,
                 )
                 if png_data:
+                    # Use URL-safe base64 and strip padding characters (=)
+                    b64_str = base64.b64encode(png_data).decode("utf-8")
                     attachments.append({
-                        "data": base64.b64encode(png_data).decode("utf-8"),
-                        "filename": "results.png"
+                        "base64": b64_str,
+                        "filename": "results.png",
+                        "content_type": "image/png",
                     })
 
-            # Check if we need to split
             full_msg = "\n\n".join(filter(None, [header, c_text, i_text, footer]))
-            
             targets = [test_channel] if test_channel else guild_channels.get(gid, [])
 
             for ch_id in targets:
+                # Use attachments only if we actually have them
+                current_attachments = attachments if attachments else None
+                
                 if len(full_msg) > 2000:
-                    # Message 1: Header + Classic
                     msg1 = "\n\n".join(filter(None, [header, c_text]))
                     _send_message(ch_id, msg1)
 
-                    # Message 2: Inferno + Footer + Attachments + Components
                     msg2 = "\n\n".join(filter(None, [i_text, footer]))
                     ok = _send_message(
                         ch_id, 
                         msg2, 
                         components=DAILY_COMPONENTS, 
-                        attachments=attachments
+                        attachments=current_attachments
                     )
                 else:
                     ok = _send_message(
                         ch_id,
                         full_msg,
                         components=DAILY_COMPONENTS,
-                        attachments=attachments
+                        attachments=current_attachments
                     )
                 
                 if ok:
@@ -228,12 +234,8 @@ def _run_daily_notifications(
                     failed += 1
                     failures.append(ch_id)
 
-            del attachments
+            del png_data, attachments
             gc.collect()
-
-        avatars.clear()
-        del classic_summaries, inferno_summaries
-        gc.collect()
 
     elapsed = round(time.time() - started, 1)
     report = (
@@ -256,6 +258,87 @@ def _run_daily_notifications(
         report_msg += f"\nFailed: {', '.join(failures)}"
     _send_message(REPORT_CHANNEL_ID, report_msg, bot="automation")
 
+
+def _run_cybergrind_cleanup():
+    import datetime
+    from utils import get_r2_client
+    
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    s3 = get_r2_client()
+    bucket_name = "inferno-cybergrind"
+    
+    # 6 hours ago
+    threshold = (
+        datetime.datetime.now(datetime.timezone.utc) - 
+        datetime.timedelta(hours=3)
+    ).isoformat()
+
+    print("[cleanup] Starting bucket-driven cleanup...")
+
+    # 1. Find every unique "Run ID" folder in the bucket
+    paginator = s3.get_paginator("list_objects_v2")
+    r2_run_ids = []
+    
+    # We use Delimiter to only get the top-level folders (Run IDs)
+    for page in paginator.paginate(Bucket=bucket_name, Delimiter='/'):
+        for prefix in page.get("CommonPrefixes", []):
+            folder_name = prefix["Prefix"].strip("/")
+            if folder_name.isdigit():
+                r2_run_ids.append(int(folder_name))
+
+    if not r2_run_ids:
+        print("[cleanup] R2 bucket is empty.")
+        return
+
+    print(f"[cleanup] Found {len(r2_run_ids)} run folders in R2. Filtering by age...")
+
+    # 2. Check the DB for these specific runs to see which are older than 6 hours
+    res = (
+        sb.from_("ig_cybergrind_runs")
+        .select("id, status, ended_at")
+        .in_("id", r2_run_ids)
+        .lt("created_at", threshold)
+        .execute()
+    )
+    
+    expired_runs = res.data or []
+    
+    if not expired_runs:
+        print("[cleanup] No run folders in R2 are older than 6 hours.")
+        return
+
+    print(f"[cleanup] Found {len(expired_runs)} expired runs to delete.")
+
+    # 3. Delete them
+    for run in expired_runs:
+        run_id = str(run["id"])
+        keys_to_delete = []
+        
+        # List all files inside the run folder
+        for page in paginator.paginate(Bucket=bucket_name, Prefix=f"{run_id}/"):
+            if "Contents" in page:
+                for obj in page["Contents"]:
+                    keys_to_delete.append({"Key": obj["Key"]})
+
+        if keys_to_delete:
+            # Batch delete (max 1000)
+            for i in range(0, len(keys_to_delete), 1000):
+                batch = keys_to_delete[i : i + 1000]
+                s3.delete_objects(
+                    Bucket=bucket_name,
+                    Delete={"Objects": batch, "Quiet": True}
+                )
+            
+            print(f"[cleanup] Run {run_id} ({run['status']}): Deleted {len(keys_to_delete)} images.")
+        
+        # 4. Mark cleaned in DB so our other query doesn't pick it up
+        sb.from_("ig_cybergrind_runs") \
+          .update({"cleaned_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}) \
+          .eq("id", run["id"]) \
+          .execute()
+
+    print(f"[cleanup] Finished processing {len(expired_runs)} runs.")
+    
 
 def _run_refetch_submitters():
     started = time.time()
