@@ -80,7 +80,7 @@ def _process_cybergrind_transfer(data: CybergrindSetupRequest):
     s3 = get_r2_client()
     try:
         # Download from level-images
-        source_url = f"https://gallery.ultrakidle.online/{data.source_path}"
+        source_url = f"https://images.ultrakidle.online/{data.source_path}"
         res = requests.get(source_url, timeout=30)
         if not res.ok:
             return

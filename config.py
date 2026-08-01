@@ -24,7 +24,7 @@ R2_ACCESS_KEY_ID = os.environ["R2_ACCESS_KEY_ID"]
 R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
 R2_S3_ENDPOINT = os.environ["R2_S3_ENDPOINT"]  # https://<id>.r2.cloudflarestorage.com
 
-LEVEL_IMAGES_URL = "https://gallery.ultrakidle.online"
+LEVEL_IMAGES_URL = "https://images.ultrakidle.online"
 CYBERGRIND_IMAGES_URL = "https://cgimages.ultrakidle.online"
 
 DISCORD_HEADERS = {
